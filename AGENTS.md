@@ -1,5 +1,16 @@
 # Repository Guidelines
 
+## Developer Workflow
+
+1. Git pull on `main`.
+2. Run all tests to verify correctness.
+3. Identify the next change to make. Work in small changes.
+4. Create a new feature branch.
+5. Write a new test. Verify the test fails.
+6. Implement the feature to make the test pass.
+7. Update all related documentation.
+8. Commit and push. Do not merge to main.
+
 ## Project Structure & Module Organization
 - `src/main.rs`: single-binary Rust CLI entry point and core logic.
 - `Cargo.toml`: dependencies and package metadata.
