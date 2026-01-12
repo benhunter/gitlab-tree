@@ -100,40 +100,48 @@ fn ui(
     }
     frame.render_stateful_widget(list, chunks[0], &mut state);
 
+    let token_state = if app.config.gitlab_token.is_empty() {
+        "token: unset"
+    } else {
+        "token: set"
+    };
     let help = Paragraph::new(format!(
-        "q quit | up/down move | right expand | left collapse | {} as {}",
-        app.config.gitlab_url, app.config.gitlab_user
+        "q quit | up/down move | right expand | left collapse | {} | {}",
+        app.config.gitlab_url, token_state
     ));
     frame.render_widget(help, chunks[1]);
 }
 
 struct Config {
     gitlab_url: String,
-    gitlab_user: String,
     gitlab_token: String,
 }
 
 impl Config {
     fn from_env() -> Result<Self> {
-        let gitlab_url = read_env("GITLAB_URL")?;
-        let gitlab_user = read_env("GITLAB_USER")?;
-        let gitlab_token = read_env("GITLAB_TOKEN")?;
+        let gitlab_url =
+            read_env_optional("GITLAB_URL").unwrap_or_else(|| "https://gitlab.com".to_string());
+        let gitlab_token = read_env_required("GITLAB_TOKEN")?;
 
         Ok(Self {
             gitlab_url,
-            gitlab_user,
             gitlab_token,
         })
     }
 }
 
-fn read_env(key: &str) -> Result<String> {
-    let value = env::var(key)
-        .map_err(|_| anyhow::anyhow!("missing required environment variable: {key}"))?;
-    if value.trim().is_empty() {
-        anyhow::bail!("environment variable {key} is set but empty");
+fn read_env_optional(key: &str) -> Option<String> {
+    match env::var(key) {
+        Ok(value) if !value.trim().is_empty() => Some(value),
+        _ => None,
     }
-    Ok(value)
+}
+
+fn read_env_required(key: &str) -> Result<String> {
+    match env::var(key) {
+        Ok(value) if !value.trim().is_empty() => Ok(value),
+        _ => anyhow::bail!("missing required environment variable: {key}"),
+    }
 }
 
 #[derive(Clone)]
