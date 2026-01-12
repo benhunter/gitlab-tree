@@ -1,6 +1,7 @@
 # gitlab-tree
 
 Ratatui-based CLI to explore GitLab groups and projects as a tree.
+The right-hand details pane shows metadata like path, visibility, and last activity.
 
 ## Requirements
 

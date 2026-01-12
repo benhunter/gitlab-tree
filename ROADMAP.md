@@ -8,12 +8,12 @@
 - Show a loading view while fetching GitLab data to avoid a blank screen.
 - Show personal projects in the tree using the username as the top-level group.
 - Show a toast notification after yanking a URL to the clipboard.
+- Show project metadata (path, visibility, last activity) in the UI.
 
 ## Near Term
 - TBD.
 - Expand/contract the tree by pressing Enter.
 
 ## Future
-- Show project metadata (path, visibility, last activity) in the UI.
 - Add search and fuzzy filtering across groups/projects.
 - Cache API responses to speed up startup.

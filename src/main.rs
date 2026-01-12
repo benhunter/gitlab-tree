@@ -166,6 +166,11 @@ fn ui(
         })
         .collect();
 
+    let main_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)])
+        .split(chunks[0]);
+
     let list = List::new(items)
         .block(Block::default().title("GitLab Tree").borders(Borders::ALL))
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
@@ -173,7 +178,17 @@ fn ui(
     if !visible.is_empty() {
         state.select(Some(app.selected));
     }
-    frame.render_stateful_widget(list, chunks[0], &mut state);
+    frame.render_stateful_widget(list, main_chunks[0], &mut state);
+
+    let details_lines = if visible.is_empty() {
+        vec!["No selection".to_string()]
+    } else {
+        let node_id = visible[app.selected].id;
+        format_node_details(&app.nodes[node_id])
+    };
+    let details = Paragraph::new(details_lines.join("\n"))
+        .block(Block::default().title("Details").borders(Borders::ALL));
+    frame.render_widget(details, main_chunks[1]);
 
     let token_state = if app.config.gitlab_token.is_empty() {
         "token: unset"
@@ -200,6 +215,24 @@ fn ui_loading(frame: &mut ratatui::Frame, tick: usize) {
     let message = loading_message(tick);
     let paragraph = Paragraph::new(message).block(block);
     frame.render_widget(paragraph, frame.size());
+}
+
+fn format_node_details(node: &Node) -> Vec<String> {
+    let kind = match node.kind {
+        NodeKind::Group => "Group",
+        NodeKind::Project => "Project",
+    };
+    let mut lines = vec![
+        format!("Name: {}", node.name),
+        format!("Kind: {kind}"),
+        format!("Path: {}", node.path),
+        format!("Visibility: {}", node.visibility),
+        format!("URL: {}", node.url),
+    ];
+    if let Some(last_activity) = &node.last_activity {
+        lines.push(format!("Last activity: {last_activity}"));
+    }
+    lines
 }
 
 fn render_toast(frame: &mut ratatui::Frame, toast: &Toast) {
@@ -333,6 +366,8 @@ struct GitLabGroup {
     id: usize,
     name: String,
     web_url: String,
+    full_path: String,
+    visibility: String,
     #[serde(default)]
     parent_id: Option<usize>,
 }
@@ -341,6 +376,9 @@ struct GitLabGroup {
 struct GitLabProject {
     name: String,
     web_url: String,
+    path_with_namespace: String,
+    visibility: String,
+    last_activity_at: Option<String>,
 }
 
 struct GroupProjects {
@@ -604,6 +642,9 @@ struct Node {
     children: Vec<usize>,
     expanded: bool,
     url: String,
+    path: String,
+    visibility: String,
+    last_activity: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -639,18 +680,27 @@ impl App {
             "dev-platform",
             NodeKind::Group,
             "https://gitlab.example.com/dev-platform",
+            "dev-platform",
+            "private",
+            None,
         );
         let data = push_node(
             &mut nodes,
             "data",
             NodeKind::Group,
             "https://gitlab.example.com/data",
+            "data",
+            "private",
+            None,
         );
         let sec = push_node(
             &mut nodes,
             "security",
             NodeKind::Group,
             "https://gitlab.example.com/security",
+            "security",
+            "private",
+            None,
         );
 
         let dev_backend = push_node(
@@ -658,18 +708,27 @@ impl App {
             "backend",
             NodeKind::Group,
             "https://gitlab.example.com/dev-platform/backend",
+            "dev-platform/backend",
+            "private",
+            None,
         );
         let dev_frontend = push_node(
             &mut nodes,
             "frontend",
             NodeKind::Group,
             "https://gitlab.example.com/dev-platform/frontend",
+            "dev-platform/frontend",
+            "private",
+            None,
         );
         let dev_platform_proj = push_node(
             &mut nodes,
             "platform-tools",
             NodeKind::Project,
             "https://gitlab.example.com/dev-platform/platform-tools",
+            "dev-platform/platform-tools",
+            "private",
+            None,
         );
         nodes[dev_platform].children.extend([dev_backend, dev_frontend, dev_platform_proj]);
 
@@ -678,12 +737,18 @@ impl App {
             "api",
             NodeKind::Project,
             "https://gitlab.example.com/dev-platform/backend/api",
+            "dev-platform/backend/api",
+            "private",
+            None,
         );
         let auth = push_node(
             &mut nodes,
             "auth",
             NodeKind::Project,
             "https://gitlab.example.com/dev-platform/backend/auth",
+            "dev-platform/backend/auth",
+            "private",
+            None,
         );
         nodes[dev_backend].children.extend([api, auth]);
 
@@ -692,12 +757,18 @@ impl App {
             "web",
             NodeKind::Project,
             "https://gitlab.example.com/dev-platform/frontend/web",
+            "dev-platform/frontend/web",
+            "private",
+            None,
         );
         let design = push_node(
             &mut nodes,
             "design-system",
             NodeKind::Project,
             "https://gitlab.example.com/dev-platform/frontend/design-system",
+            "dev-platform/frontend/design-system",
+            "private",
+            None,
         );
         nodes[dev_frontend].children.extend([web, design]);
 
@@ -706,18 +777,27 @@ impl App {
             "ingest",
             NodeKind::Group,
             "https://gitlab.example.com/data/ingest",
+            "data/ingest",
+            "private",
+            None,
         );
         let data_models = push_node(
             &mut nodes,
             "models",
             NodeKind::Group,
             "https://gitlab.example.com/data/models",
+            "data/models",
+            "private",
+            None,
         );
         let data_tools = push_node(
             &mut nodes,
             "data-tools",
             NodeKind::Project,
             "https://gitlab.example.com/data/data-tools",
+            "data/data-tools",
+            "private",
+            None,
         );
         nodes[data].children.extend([data_ingest, data_models, data_tools]);
 
@@ -726,12 +806,18 @@ impl App {
             "ingest",
             NodeKind::Project,
             "https://gitlab.example.com/data/ingest/ingest",
+            "data/ingest/ingest",
+            "private",
+            None,
         );
         let pipeline = push_node(
             &mut nodes,
             "pipeline",
             NodeKind::Project,
             "https://gitlab.example.com/data/ingest/pipeline",
+            "data/ingest/pipeline",
+            "private",
+            None,
         );
         nodes[data_ingest].children.extend([ingest, pipeline]);
 
@@ -740,12 +826,18 @@ impl App {
             "fraud",
             NodeKind::Project,
             "https://gitlab.example.com/data/models/fraud",
+            "data/models/fraud",
+            "private",
+            None,
         );
         let churn = push_node(
             &mut nodes,
             "churn",
             NodeKind::Project,
             "https://gitlab.example.com/data/models/churn",
+            "data/models/churn",
+            "private",
+            None,
         );
         nodes[data_models].children.extend([fraud, churn]);
 
@@ -754,12 +846,18 @@ impl App {
             "sec-tools",
             NodeKind::Project,
             "https://gitlab.example.com/security/sec-tools",
+            "security/sec-tools",
+            "private",
+            None,
         );
         let audits = push_node(
             &mut nodes,
             "audits",
             NodeKind::Project,
             "https://gitlab.example.com/security/audits",
+            "security/audits",
+            "private",
+            None,
         );
         nodes[sec].children.extend([sec_tools, audits]);
 
@@ -812,7 +910,15 @@ impl App {
         let mut nodes = Vec::new();
         let mut id_to_node = HashMap::new();
         for group in &groups {
-            let node_id = push_node(&mut nodes, &group.name, NodeKind::Group, &group.web_url);
+            let node_id = push_node(
+                &mut nodes,
+                &group.name,
+                NodeKind::Group,
+                &group.web_url,
+                &group.full_path,
+                &group.visibility,
+                None,
+            );
             id_to_node.insert(group.id, node_id);
         }
 
@@ -836,17 +942,39 @@ impl App {
                 continue;
             };
             for project in entry.projects {
-                let project_node =
-                    push_node(&mut nodes, &project.name, NodeKind::Project, &project.web_url);
+                let project_node = push_node(
+                    &mut nodes,
+                    &project.name,
+                    NodeKind::Project,
+                    &project.web_url,
+                    &project.path_with_namespace,
+                    &project.visibility,
+                    project.last_activity_at.clone(),
+                );
                 nodes[parent_node].children.push(project_node);
             }
         }
 
         if let Some(personal) = personal {
-            let root = push_node(&mut nodes, &personal.username, NodeKind::Group, &personal.web_url);
+            let root = push_node(
+                &mut nodes,
+                &personal.username,
+                NodeKind::Group,
+                &personal.web_url,
+                &personal.username,
+                "private",
+                None,
+            );
             for project in personal.projects {
-                let project_node =
-                    push_node(&mut nodes, &project.name, NodeKind::Project, &project.web_url);
+                let project_node = push_node(
+                    &mut nodes,
+                    &project.name,
+                    NodeKind::Project,
+                    &project.web_url,
+                    &project.path_with_namespace,
+                    &project.visibility,
+                    project.last_activity_at.clone(),
+                );
                 nodes[root].children.push(project_node);
             }
             roots.push(root);
@@ -1027,7 +1155,15 @@ struct VisibleNode {
     depth: usize,
 }
 
-fn push_node(nodes: &mut Vec<Node>, name: &str, kind: NodeKind, url: &str) -> usize {
+fn push_node(
+    nodes: &mut Vec<Node>,
+    name: &str,
+    kind: NodeKind,
+    url: &str,
+    path: &str,
+    visibility: &str,
+    last_activity: Option<String>,
+) -> usize {
     let id = nodes.len();
     nodes.push(Node {
         name: name.to_string(),
@@ -1035,6 +1171,9 @@ fn push_node(nodes: &mut Vec<Node>, name: &str, kind: NodeKind, url: &str) -> us
         children: Vec::new(),
         expanded: false,
         url: url.to_string(),
+        path: path.to_string(),
+        visibility: visibility.to_string(),
+        last_activity,
     });
     id
 }
@@ -1056,8 +1195,24 @@ mod tests {
     #[test]
     fn visible_nodes_respects_expansion() {
         let mut nodes = Vec::new();
-        let root = push_node(&mut nodes, "root", NodeKind::Group, "https://example.com/root");
-        let child = push_node(&mut nodes, "child", NodeKind::Project, "https://example.com/child");
+        let root = push_node(
+            &mut nodes,
+            "root",
+            NodeKind::Group,
+            "https://example.com/root",
+            "root",
+            "private",
+            None,
+        );
+        let child = push_node(
+            &mut nodes,
+            "child",
+            NodeKind::Project,
+            "https://example.com/child",
+            "root/child",
+            "private",
+            None,
+        );
         nodes[root].children.push(child);
 
         let parent = build_parent_map(&nodes);
@@ -1152,18 +1307,63 @@ mod tests {
     }
 
     #[test]
+    fn format_node_details_includes_metadata() {
+        let node = Node {
+            name: "root".to_string(),
+            kind: NodeKind::Group,
+            children: Vec::new(),
+            expanded: false,
+            url: "https://example.com/root".to_string(),
+            path: "root".to_string(),
+            visibility: "private".to_string(),
+            last_activity: None,
+        };
+
+        let lines = format_node_details(&node);
+        assert!(lines.iter().any(|line| line == "Name: root"));
+        assert!(lines.iter().any(|line| line == "Kind: Group"));
+        assert!(lines.iter().any(|line| line == "Path: root"));
+        assert!(lines.iter().any(|line| line == "Visibility: private"));
+        assert!(lines.iter().any(|line| line == "URL: https://example.com/root"));
+        assert!(!lines.iter().any(|line| line.starts_with("Last activity:")));
+    }
+
+    #[test]
+    fn format_node_details_includes_last_activity_when_present() {
+        let node = Node {
+            name: "proj".to_string(),
+            kind: NodeKind::Project,
+            children: Vec::new(),
+            expanded: false,
+            url: "https://example.com/root/proj".to_string(),
+            path: "root/proj".to_string(),
+            visibility: "internal".to_string(),
+            last_activity: Some("2024-01-01T00:00:00Z".to_string()),
+        };
+
+        let lines = format_node_details(&node);
+        assert!(lines
+            .iter()
+            .any(|line| line == "Last activity: 2024-01-01T00:00:00Z"));
+    }
+
+    #[test]
     fn from_gitlab_data_builds_parent_child_relationships() {
         let groups = vec![
             GitLabGroup {
                 id: 1,
                 name: "root".to_string(),
                 web_url: "https://example.com/root".to_string(),
+                full_path: "root".to_string(),
+                visibility: "private".to_string(),
                 parent_id: None,
             },
             GitLabGroup {
                 id: 2,
                 name: "child".to_string(),
                 web_url: "https://example.com/root/child".to_string(),
+                full_path: "root/child".to_string(),
+                visibility: "private".to_string(),
                 parent_id: Some(1),
             },
         ];
@@ -1172,6 +1372,9 @@ mod tests {
             projects: vec![GitLabProject {
                 name: "proj".to_string(),
                 web_url: "https://example.com/root/proj".to_string(),
+                path_with_namespace: "root/proj".to_string(),
+                visibility: "private".to_string(),
+                last_activity_at: Some("2024-01-01T00:00:00Z".to_string()),
             }],
         }];
 
@@ -1210,6 +1413,9 @@ mod tests {
             projects: vec![GitLabProject {
                 name: "notes".to_string(),
                 web_url: "https://example.com/alice/notes".to_string(),
+                path_with_namespace: "alice/notes".to_string(),
+                visibility: "private".to_string(),
+                last_activity_at: None,
             }],
         };
 
@@ -1237,8 +1443,24 @@ mod tests {
     #[test]
     fn vim_navigation_helpers_update_selection() {
         let mut nodes = Vec::new();
-        let root = push_node(&mut nodes, "root", NodeKind::Group, "https://example.com/root");
-        let child = push_node(&mut nodes, "child", NodeKind::Project, "https://example.com/child");
+        let root = push_node(
+            &mut nodes,
+            "root",
+            NodeKind::Group,
+            "https://example.com/root",
+            "root",
+            "private",
+            None,
+        );
+        let child = push_node(
+            &mut nodes,
+            "child",
+            NodeKind::Project,
+            "https://example.com/child",
+            "root/child",
+            "private",
+            None,
+        );
         nodes[root].children.push(child);
         nodes[root].expanded = true;
 
@@ -1291,7 +1513,15 @@ mod tests {
     #[test]
     fn yank_selected_copies_url() {
         let mut nodes = Vec::new();
-        let root = push_node(&mut nodes, "root", NodeKind::Group, "https://example.com/root");
+        let root = push_node(
+            &mut nodes,
+            "root",
+            NodeKind::Group,
+            "https://example.com/root",
+            "root",
+            "private",
+            None,
+        );
         let parent = build_parent_map(&nodes);
         let mut app = App {
             nodes,
@@ -1321,7 +1551,15 @@ mod tests {
     #[test]
     fn open_selected_opens_url() {
         let mut nodes = Vec::new();
-        let root = push_node(&mut nodes, "root", NodeKind::Group, "https://example.com/root");
+        let root = push_node(
+            &mut nodes,
+            "root",
+            NodeKind::Group,
+            "https://example.com/root",
+            "root",
+            "private",
+            None,
+        );
         let parent = build_parent_map(&nodes);
         let mut app = App {
             nodes,
