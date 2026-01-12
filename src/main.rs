@@ -1,4 +1,10 @@
-use std::{collections::HashMap, env, io, time::Duration};
+use std::{
+    collections::HashMap,
+    env,
+    io,
+    path::PathBuf,
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
 use std::sync::mpsc;
 use std::thread;
 
@@ -16,7 +22,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Terminal,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 fn main() -> Result<()> {
     let config = Config::from_env()?;
@@ -288,6 +294,8 @@ struct Config {
     gitlab_url: String,
     gitlab_token: String,
     filters: ApiFilters,
+    cache_path: PathBuf,
+    cache_ttl: Duration,
 }
 
 impl Config {
@@ -303,11 +311,18 @@ impl Config {
             read_env_optional(&reader, "GITLAB_URL").unwrap_or_else(|| "https://gitlab.com".to_string());
         let gitlab_token = read_env_required(&reader, "GITLAB_TOKEN")?;
         let filters = ApiFilters::from_env_reader(&reader)?;
+        let cache_ttl_seconds =
+            read_env_u64_optional(&reader, "GITLAB_CACHE_TTL_SECONDS")?.unwrap_or(300);
+        let cache_path = read_env_optional(&reader, "GITLAB_CACHE_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(default_cache_path);
 
         Ok(Self {
             gitlab_url,
             gitlab_token,
             filters,
+            cache_path,
+            cache_ttl: Duration::from_secs(cache_ttl_seconds),
         })
     }
 }
@@ -377,7 +392,7 @@ impl BrowserOpener for SystemBrowser {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct GitLabGroup {
     id: usize,
     name: String,
@@ -388,7 +403,7 @@ struct GitLabGroup {
     parent_id: Option<usize>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct GitLabProject {
     name: String,
     web_url: String,
@@ -397,6 +412,7 @@ struct GitLabProject {
     last_activity_at: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct GroupProjects {
     group_id: usize,
     projects: Vec<GitLabProject>,
@@ -407,10 +423,67 @@ struct GitLabUser {
     username: String,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct PersonalProjects {
     username: String,
     web_url: String,
     projects: Vec<GitLabProject>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CacheData {
+    created_at: u64,
+    groups: Vec<GitLabGroup>,
+    projects_by_group: Vec<GroupProjects>,
+    personal: Option<PersonalProjects>,
+}
+
+struct CacheStore {
+    path: PathBuf,
+    ttl: Duration,
+}
+
+impl CacheStore {
+    fn new(path: PathBuf, ttl: Duration) -> Self {
+        Self { path, ttl }
+    }
+
+    fn load(&self) -> Result<Option<CacheData>> {
+        if !self.path.exists() {
+            return Ok(None);
+        }
+        let data = match std::fs::read(&self.path) {
+            Ok(data) => data,
+            Err(_) => return Ok(None),
+        };
+        let cache: CacheData = match serde_json::from_slice(&data) {
+            Ok(cache) => cache,
+            Err(_) => return Ok(None),
+        };
+        if cache_is_valid(cache.created_at, self.ttl, SystemTime::now()) {
+            Ok(Some(cache))
+        } else {
+            Ok(None)
+        }
+    }
+
+    fn store(&self, cache: &CacheData) -> Result<()> {
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let data = serde_json::to_vec_pretty(cache)?;
+        std::fs::write(&self.path, data)?;
+        Ok(())
+    }
+}
+
+fn cache_is_valid(created_at: u64, ttl: Duration, now: SystemTime) -> bool {
+    let Ok(now) = now.duration_since(UNIX_EPOCH) else {
+        return false;
+    };
+    let now = now.as_secs();
+    let ttl = ttl.as_secs();
+    now.saturating_sub(created_at) <= ttl
 }
 
 fn fetch_groups(config: &Config) -> Result<Vec<GitLabGroup>> {
@@ -649,6 +722,24 @@ where
         .parse::<u16>()
         .map_err(|_| anyhow::anyhow!("invalid integer for {key}: {value}"))?;
     Ok(Some(parsed))
+}
+
+fn read_env_u64_optional<F>(reader: &F, key: &str) -> Result<Option<u64>>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(value) = read_env_optional(reader, key) else {
+        return Ok(None);
+    };
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| anyhow::anyhow!("invalid integer for {key}: {value}"))?;
+    Ok(Some(parsed))
+}
+
+fn default_cache_path() -> PathBuf {
+    let base = dirs::cache_dir().unwrap_or_else(|| PathBuf::from("."));
+    base.join("gitlab-tree").join("cache.json")
 }
 
 #[derive(Clone)]
@@ -900,6 +991,26 @@ impl App {
     }
 
     fn from_gitlab(config: Config) -> Result<Self> {
+        let cache = CacheStore::new(config.cache_path.clone(), config.cache_ttl);
+        if let Some(cache) = cache.load()? {
+            let total_projects: usize =
+                cache.projects_by_group.iter().map(|entry| entry.projects.len()).sum();
+            let personal_count = cache.personal.as_ref().map(|entry| entry.projects.len()).unwrap_or(0);
+            let status = format!(
+                "cache hit | groups: {}, projects: {}, personal: {}",
+                cache.groups.len(),
+                total_projects,
+                personal_count
+            );
+            return Ok(Self::from_gitlab_data(
+                cache.groups,
+                cache.projects_by_group,
+                cache.personal,
+                config,
+                status,
+            ));
+        }
+
         let groups = fetch_groups(&config)?;
         let projects = fetch_projects_by_group(&config, &groups)?;
         let personal = fetch_personal_projects(&config).ok();
@@ -911,6 +1022,16 @@ impl App {
             total_projects,
             personal_count
         );
+        let cache_data = CacheData {
+            created_at: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+            groups: groups.clone(),
+            projects_by_group: projects.clone(),
+            personal: personal.clone(),
+        };
+        let _ = cache.store(&cache_data);
         Ok(Self::from_gitlab_data(
             groups,
             projects,
@@ -1288,6 +1409,17 @@ fn fuzzy_match(needle: &str, haystack: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    fn test_config() -> Config {
+        Config {
+            gitlab_url: "https://gitlab.com".to_string(),
+            gitlab_token: "token".to_string(),
+            filters: ApiFilters::default(),
+            cache_path: default_cache_path(),
+            cache_ttl: Duration::from_secs(300),
+        }
+    }
 
     #[test]
     fn visible_nodes_respects_expansion() {
@@ -1318,11 +1450,7 @@ mod tests {
             roots: vec![root],
             parent,
             selected: 0,
-            config: Config {
-                gitlab_url: "https://gitlab.com".to_string(),
-                gitlab_token: "token".to_string(),
-                filters: ApiFilters::default(),
-            },
+            config: test_config(),
             status: None,
             pending_g: false,
             toast: None,
@@ -1353,6 +1481,10 @@ mod tests {
         assert_eq!(config.gitlab_token, "token");
         assert_eq!(config.filters.per_page, 100);
         assert!(config.filters.all_available.is_none());
+        assert_eq!(config.cache_ttl.as_secs(), 300);
+        assert!(config
+            .cache_path
+            .ends_with(PathBuf::from("gitlab-tree").join("cache.json")));
     }
 
     #[test]
@@ -1372,6 +1504,8 @@ mod tests {
             "GITLAB_INCLUDE_SUBGROUPS" => Some("on".to_string()),
             "GITLAB_VISIBILITY" => Some("private".to_string()),
             "GITLAB_PER_PAGE" => Some("50".to_string()),
+            "GITLAB_CACHE_TTL_SECONDS" => Some("120".to_string()),
+            "GITLAB_CACHE_PATH" => Some("/tmp/gitlab-tree-cache.json".to_string()),
             _ => None,
         };
 
@@ -1382,6 +1516,11 @@ mod tests {
         assert_eq!(config.filters.top_level_only, Some(true));
         assert_eq!(config.filters.include_subgroups, Some(true));
         assert_eq!(config.filters.visibility.as_deref(), Some("private"));
+        assert_eq!(config.cache_ttl.as_secs(), 120);
+        assert_eq!(
+            config.cache_path,
+            PathBuf::from("/tmp/gitlab-tree-cache.json")
+        );
     }
 
     #[test]
@@ -1534,11 +1673,7 @@ mod tests {
             groups,
             projects,
             None,
-            Config {
-                gitlab_url: "https://gitlab.com".to_string(),
-                gitlab_token: "token".to_string(),
-                filters: ApiFilters::default(),
-            },
+            test_config(),
             "groups: 2".to_string(),
         );
 
@@ -1575,11 +1710,7 @@ mod tests {
             Vec::new(),
             Vec::new(),
             Some(personal),
-            Config {
-                gitlab_url: "https://gitlab.com".to_string(),
-                gitlab_token: "token".to_string(),
-                filters: ApiFilters::default(),
-            },
+            test_config(),
             "personal: 1".to_string(),
         );
 
@@ -1622,11 +1753,7 @@ mod tests {
             roots: vec![root],
             parent,
             selected: 1,
-            config: Config {
-                gitlab_url: "https://gitlab.com".to_string(),
-                gitlab_token: "token".to_string(),
-                filters: ApiFilters::default(),
-            },
+            config: test_config(),
             status: None,
             pending_g: false,
             toast: None,
@@ -1648,11 +1775,7 @@ mod tests {
             roots: Vec::new(),
             parent: Vec::new(),
             selected: 0,
-            config: Config {
-                gitlab_url: "https://gitlab.com".to_string(),
-                gitlab_token: "token".to_string(),
-                filters: ApiFilters::default(),
-            },
+            config: test_config(),
             status: None,
             pending_g: false,
             toast: None,
@@ -1684,11 +1807,7 @@ mod tests {
             roots: vec![root],
             parent,
             selected: 0,
-            config: Config {
-                gitlab_url: "https://gitlab.com".to_string(),
-                gitlab_token: "token".to_string(),
-                filters: ApiFilters::default(),
-            },
+            config: test_config(),
             status: None,
             pending_g: false,
             toast: None,
@@ -1724,11 +1843,7 @@ mod tests {
             roots: vec![root],
             parent,
             selected: 0,
-            config: Config {
-                gitlab_url: "https://gitlab.com".to_string(),
-                gitlab_token: "token".to_string(),
-                filters: ApiFilters::default(),
-            },
+            config: test_config(),
             status: None,
             pending_g: false,
             toast: None,
@@ -1753,11 +1868,7 @@ mod tests {
             roots: Vec::new(),
             parent: Vec::new(),
             selected: 0,
-            config: Config {
-                gitlab_url: "https://gitlab.com".to_string(),
-                gitlab_token: "token".to_string(),
-                filters: ApiFilters::default(),
-            },
+            config: test_config(),
             status: None,
             pending_g: false,
             toast: None,
@@ -1771,6 +1882,56 @@ mod tests {
         }
 
         assert!(app.toast.is_none());
+    }
+
+    #[test]
+    fn cache_is_valid_respects_ttl() {
+        let ttl = Duration::from_secs(10);
+        let now = UNIX_EPOCH + Duration::from_secs(100);
+        assert!(cache_is_valid(95, ttl, now));
+        assert!(!cache_is_valid(80, ttl, now));
+    }
+
+    #[test]
+    fn cache_store_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("cache.json");
+        let store = CacheStore::new(path, Duration::from_secs(60));
+        let created_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let data = CacheData {
+            created_at,
+            groups: vec![GitLabGroup {
+                id: 1,
+                name: "root".to_string(),
+                web_url: "https://example.com/root".to_string(),
+                full_path: "root".to_string(),
+                visibility: "private".to_string(),
+                parent_id: None,
+            }],
+            projects_by_group: vec![GroupProjects {
+                group_id: 1,
+                projects: vec![GitLabProject {
+                    name: "proj".to_string(),
+                    web_url: "https://example.com/root/proj".to_string(),
+                    path_with_namespace: "root/proj".to_string(),
+                    visibility: "private".to_string(),
+                    last_activity_at: Some("2024-01-01T00:00:00Z".to_string()),
+                }],
+            }],
+            personal: None,
+        };
+
+        store.store(&data).expect("store cache");
+        let loaded = store.load().expect("load cache");
+        let loaded = loaded.expect("cache should be present");
+
+        assert_eq!(loaded.groups.len(), 1);
+        assert_eq!(loaded.groups[0].name, "root");
+        assert_eq!(loaded.projects_by_group.len(), 1);
+        assert_eq!(loaded.projects_by_group[0].projects[0].name, "proj");
     }
 
     struct MockClipboard {

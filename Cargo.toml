@@ -7,7 +7,12 @@ edition = "2024"
 anyhow = "1.0"
 arboard = "3.4"
 crossterm = "0.27"
+dirs = "6.0"
 open = "5.3"
 ratatui = "0.26"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[dev-dependencies]
+tempfile = "3.10"

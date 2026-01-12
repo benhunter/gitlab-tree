@@ -21,6 +21,8 @@ Set the following environment variables:
 - `GITLAB_INCLUDE_SUBGROUPS` (optional): include subgroup projects (`true`/`false`).
 - `GITLAB_VISIBILITY` (optional): filter by visibility (`private`, `internal`, `public`).
 - `GITLAB_PER_PAGE` (optional): page size for API calls (default `100`).
+- `GITLAB_CACHE_TTL_SECONDS` (optional): cache TTL in seconds (default `300`).
+- `GITLAB_CACHE_PATH` (optional): override cache file location.
 
 ## Run
 
