@@ -1,4 +1,4 @@
-use std::{env, io, time::Duration};
+use std::{collections::HashMap, env, io, time::Duration};
 
 use anyhow::Result;
 use crossterm::{
@@ -13,6 +13,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Terminal,
 };
+use serde::Deserialize;
 
 fn main() -> Result<()> {
     let config = Config::from_env()?;
@@ -38,7 +39,10 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
 }
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, config: Config) -> Result<()> {
-    let mut app = App::sample(config);
+    let mut app = match App::from_gitlab(config.clone()) {
+        Ok(app) => app,
+        Err(err) => App::sample_with_status(config, format!("load error: {err}")),
+    };
     loop {
         let visible = app.visible_nodes();
         app.ensure_selection(visible.len());
@@ -105,13 +109,18 @@ fn ui(
     } else {
         "token: set"
     };
-    let help = Paragraph::new(format!(
+    let mut footer = format!(
         "q quit | up/down move | right expand | left collapse | {} | {}",
         app.config.gitlab_url, token_state
-    ));
+    );
+    if let Some(status) = &app.status {
+        footer.push_str(&format!(" | {status}"));
+    }
+    let help = Paragraph::new(footer);
     frame.render_widget(help, chunks[1]);
 }
 
+#[derive(Clone)]
 struct Config {
     gitlab_url: String,
     gitlab_token: String,
@@ -137,6 +146,123 @@ impl Config {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct GitLabGroup {
+    id: usize,
+    name: String,
+    #[serde(default)]
+    parent_id: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitLabProject {
+    name: String,
+}
+
+struct GroupProjects {
+    group_id: usize,
+    projects: Vec<GitLabProject>,
+}
+
+fn fetch_groups(config: &Config) -> Result<Vec<GitLabGroup>> {
+    let client = reqwest::blocking::Client::new();
+    let base = config.gitlab_url.trim_end_matches('/');
+    let url = format!("{base}/api/v4/groups");
+    let mut page = 1usize;
+    let mut all = Vec::new();
+
+    loop {
+        let resp = client
+            .get(&url)
+            .header("PRIVATE-TOKEN", &config.gitlab_token)
+            .query(&[
+                ("per_page", "100"),
+                ("page", &page.to_string()),
+                ("membership", "true"),
+            ])
+            .send()?
+            .error_for_status()?;
+
+        let next_page = resp
+            .headers()
+            .get("x-next-page")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        let mut page_groups: Vec<GitLabGroup> = resp.json()?;
+        all.append(&mut page_groups);
+
+        if next_page.is_empty() {
+            break;
+        }
+
+        page = next_page
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid x-next-page header: {next_page}"))?;
+    }
+
+    Ok(all)
+}
+
+fn fetch_group_projects(config: &Config, group_id: usize) -> Result<Vec<GitLabProject>> {
+    let client = reqwest::blocking::Client::new();
+    let base = config.gitlab_url.trim_end_matches('/');
+    let url = format!("{base}/api/v4/groups/{group_id}/projects");
+    let mut page = 1usize;
+    let mut all = Vec::new();
+
+    loop {
+        let resp = client
+            .get(&url)
+            .header("PRIVATE-TOKEN", &config.gitlab_token)
+            .query(&[
+                ("per_page", "100"),
+                ("page", &page.to_string()),
+                ("simple", "true"),
+                ("include_subgroups", "false"),
+            ])
+            .send()?
+            .error_for_status()?;
+
+        let next_page = resp
+            .headers()
+            .get("x-next-page")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        let mut page_projects: Vec<GitLabProject> = resp.json()?;
+        all.append(&mut page_projects);
+
+        if next_page.is_empty() {
+            break;
+        }
+
+        page = next_page
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid x-next-page header: {next_page}"))?;
+    }
+
+    Ok(all)
+}
+
+fn fetch_projects_by_group(
+    config: &Config,
+    groups: &[GitLabGroup],
+) -> Result<Vec<GroupProjects>> {
+    let mut projects = Vec::with_capacity(groups.len());
+    for group in groups {
+        let group_projects = fetch_group_projects(config, group.id)?;
+        projects.push(GroupProjects {
+            group_id: group.id,
+            projects: group_projects,
+        });
+    }
+    Ok(projects)
+}
 fn read_env_optional<F>(reader: &F, key: &str) -> Option<String>
 where
     F: Fn(&str) -> Option<String>,
@@ -174,10 +300,11 @@ struct App {
     parent: Vec<Option<usize>>,
     selected: usize,
     config: Config,
+    status: Option<String>,
 }
 
 impl App {
-    fn sample(config: Config) -> Self {
+    fn sample_with_status(config: Config, status: String) -> Self {
         let mut nodes = Vec::new();
 
         let dev_platform = push_node(&mut nodes, "dev-platform", NodeKind::Group);
@@ -226,6 +353,69 @@ impl App {
             parent,
             selected: 0,
             config,
+            status: Some(status),
+        }
+    }
+
+    fn from_gitlab(config: Config) -> Result<Self> {
+        let groups = fetch_groups(&config)?;
+        let projects = fetch_projects_by_group(&config, &groups)?;
+        let total_projects: usize = projects.iter().map(|entry| entry.projects.len()).sum();
+        let status = format!("groups: {}, projects: {}", groups.len(), total_projects);
+        Ok(Self::from_gitlab_data(groups, projects, config, status))
+    }
+
+    fn from_gitlab_data(
+        groups: Vec<GitLabGroup>,
+        projects_by_group: Vec<GroupProjects>,
+        config: Config,
+        status: String,
+    ) -> Self {
+        let mut nodes = Vec::new();
+        let mut id_to_node = HashMap::new();
+        for group in &groups {
+            let node_id = push_node(&mut nodes, &group.name, NodeKind::Group);
+            id_to_node.insert(group.id, node_id);
+        }
+
+        let mut roots = Vec::new();
+        for group in &groups {
+            let child_id = match id_to_node.get(&group.id) {
+                Some(id) => *id,
+                None => continue,
+            };
+            if let Some(parent_id) = group.parent_id {
+                if let Some(parent_node) = id_to_node.get(&parent_id) {
+                    nodes[*parent_node].children.push(child_id);
+                    continue;
+                }
+            }
+            roots.push(child_id);
+        }
+
+        for entry in projects_by_group {
+            let Some(parent_node) = id_to_node.get(&entry.group_id).copied() else {
+                continue;
+            };
+            for project in entry.projects {
+                let project_node = push_node(&mut nodes, &project.name, NodeKind::Project);
+                nodes[parent_node].children.push(project_node);
+            }
+        }
+
+        for &root in &roots {
+            nodes[root].expanded = true;
+        }
+
+        let parent = build_parent_map(&nodes);
+
+        Self {
+            nodes,
+            roots,
+            parent,
+            selected: 0,
+            config,
+            status: Some(status),
         }
     }
 
@@ -351,6 +541,7 @@ mod tests {
                 gitlab_url: "https://gitlab.com".to_string(),
                 gitlab_token: "token".to_string(),
             },
+            status: None,
         };
 
         let visible = app.visible_nodes();
@@ -381,5 +572,51 @@ mod tests {
         let reader = |_key: &str| None;
         let result = Config::from_env_reader(reader);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn from_gitlab_data_builds_parent_child_relationships() {
+        let groups = vec![
+            GitLabGroup {
+                id: 1,
+                name: "root".to_string(),
+                parent_id: None,
+            },
+            GitLabGroup {
+                id: 2,
+                name: "child".to_string(),
+                parent_id: Some(1),
+            },
+        ];
+        let projects = vec![GroupProjects {
+            group_id: 1,
+            projects: vec![GitLabProject {
+                name: "proj".to_string(),
+            }],
+        }];
+
+        let app = App::from_gitlab_data(
+            groups,
+            projects,
+            Config {
+                gitlab_url: "https://gitlab.com".to_string(),
+                gitlab_token: "token".to_string(),
+            },
+            "groups: 2".to_string(),
+        );
+
+        assert_eq!(app.roots.len(), 1);
+        let root_id = app.roots[0];
+        assert_eq!(app.nodes[root_id].name, "root");
+        assert_eq!(app.nodes[root_id].children.len(), 2);
+        let mut child_ids = app.nodes[root_id].children.clone();
+        child_ids.sort_by_key(|id| app.nodes[*id].name.clone());
+
+        let child_id = child_ids[0];
+        let project_id = child_ids[1];
+        assert_eq!(app.nodes[child_id].name, "child");
+        assert_eq!(app.nodes[project_id].name, "proj");
+        assert_eq!(app.parent[child_id], Some(root_id));
+        assert_eq!(app.parent[project_id], Some(root_id));
     }
 }
