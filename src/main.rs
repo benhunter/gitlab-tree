@@ -1,4 +1,6 @@
 use std::{collections::HashMap, env, io, time::Duration};
+use std::sync::mpsc;
+use std::thread;
 
 use anyhow::Result;
 use arboard::Clipboard as SystemClipboardHandle;
@@ -9,7 +11,7 @@ use crossterm::{
 };
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
     Terminal,
@@ -40,53 +42,95 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
 }
 
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, config: Config) -> Result<()> {
-    let mut app = match App::from_gitlab(config.clone()) {
-        Ok(app) => app,
-        Err(err) => App::sample_with_status(config, format!("load error: {err}")),
-    };
+    let mut loader = Some(start_loader(config.clone()));
+    let mut app = None;
     let mut clipboard = SystemClipboard::new().ok();
+    let mut browser = SystemBrowser;
     loop {
-        let visible = app.visible_nodes();
-        app.ensure_selection(visible.len());
-
-        terminal.draw(|frame| ui(frame, &app, &visible))?;
-
-        if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                match key.code {
-                    KeyCode::Char('q') => return Ok(()),
-                    KeyCode::Up => app.move_up(),
-                    KeyCode::Down => app.move_down(visible.len()),
-                    KeyCode::Left => app.collapse_or_parent(&visible),
-                    KeyCode::Right => app.expand_or_child(&visible),
-                    KeyCode::Char('k') => app.move_up(),
-                    KeyCode::Char('j') => app.move_down(visible.len()),
-                    KeyCode::Char('h') => app.collapse_or_parent(&visible),
-                    KeyCode::Char('l') => app.expand_or_child(&visible),
-                    KeyCode::Char('g') => {
-                        if app.consume_pending_g() {
-                            app.move_top();
-                        } else {
-                            app.set_pending_g();
-                        }
-                    }
-                    KeyCode::Char('G') => app.move_bottom(visible.len()),
-                    KeyCode::Char('y') => {
-                        if let Some(clipboard) = clipboard.as_mut() {
-                            match app.yank_selected(&visible, clipboard) {
-                                Ok(url) => app.set_status(format!("copied {url}")),
-                                Err(err) => app.set_status(format!("copy failed: {err}")),
-                            }
-                        } else {
-                            app.set_status("clipboard unavailable".to_string());
-                        }
-                    }
-                    _ => {}
+        if let Some(handle) = loader.as_mut() {
+            match handle.receiver.try_recv() {
+                Ok(result) => {
+                    app = Some(match result {
+                        Ok(app) => app,
+                        Err(err) => App::sample_with_status(config.clone(), format!("load error: {err}")),
+                    });
+                    loader = None;
                 }
-                if key.code != KeyCode::Char('g') {
-                    app.clear_pending_g();
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    app = Some(App::sample_with_status(
+                        config.clone(),
+                        "load error: channel closed".to_string(),
+                    ));
+                    loader = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+
+        if let Some(app) = app.as_mut() {
+            let visible = app.visible_nodes();
+            app.ensure_selection(visible.len());
+            app.tick_toast();
+
+            terminal.draw(|frame| ui(frame, app, &visible))?;
+
+            if event::poll(Duration::from_millis(200))? {
+                if let Event::Key(key) = event::read()? {
+                    match key.code {
+                        KeyCode::Char('q') => return Ok(()),
+                        KeyCode::Up => app.move_up(),
+                        KeyCode::Down => app.move_down(visible.len()),
+                        KeyCode::Left => app.collapse_or_parent(&visible),
+                        KeyCode::Right => app.expand_or_child(&visible),
+                        KeyCode::Char('k') => app.move_up(),
+                        KeyCode::Char('j') => app.move_down(visible.len()),
+                        KeyCode::Char('h') => app.collapse_or_parent(&visible),
+                        KeyCode::Char('l') => app.expand_or_child(&visible),
+                        KeyCode::Char('g') => {
+                            if app.consume_pending_g() {
+                                app.move_top();
+                            } else {
+                                app.set_pending_g();
+                            }
+                        }
+                        KeyCode::Char('G') => app.move_bottom(visible.len()),
+                        KeyCode::Char('y') => {
+                            if let Some(clipboard) = clipboard.as_mut() {
+                                match app.yank_selected(&visible, clipboard) {
+                                    Ok(url) => {
+                                        app.set_status(format!("copied {url}"));
+                                        app.set_toast("Copied URL".to_string());
+                                    }
+                                    Err(err) => app.set_status(format!("copy failed: {err}")),
+                                }
+                            } else {
+                                app.set_status("clipboard unavailable".to_string());
+                            }
+                        }
+                        KeyCode::Char('o') => match app.open_selected(&visible, &mut browser) {
+                            Ok(url) => app.set_status(format!("opened {url}")),
+                            Err(err) => app.set_status(format!("open failed: {err}")),
+                        },
+                        _ => {}
+                    }
+                    if key.code != KeyCode::Char('g') {
+                        app.clear_pending_g();
+                    }
                 }
             }
+        } else if let Some(handle) = loader.as_mut() {
+            terminal.draw(|frame| ui_loading(frame, handle.tick))?;
+            handle.tick = handle.tick.wrapping_add(1);
+
+            if event::poll(Duration::from_millis(200))? {
+                if let Event::Key(key) = event::read()? {
+                    if key.code == KeyCode::Char('q') {
+                        return Ok(());
+                    }
+                }
+            }
+        } else {
+            return Ok(());
         }
     }
 }
@@ -137,7 +181,7 @@ fn ui(
         "token: set"
     };
     let mut footer = format!(
-        "q quit | up/down move | right expand | left collapse | y yank | {} | {}",
+        "q quit | up/down move | right expand | left collapse | y yank | o open | {} | {}",
         app.config.gitlab_url, token_state
     );
     if let Some(status) = &app.status {
@@ -145,12 +189,56 @@ fn ui(
     }
     let help = Paragraph::new(footer);
     frame.render_widget(help, chunks[1]);
+
+    if let Some(toast) = &app.toast {
+        render_toast(frame, toast);
+    }
+}
+
+fn ui_loading(frame: &mut ratatui::Frame, tick: usize) {
+    let block = Block::default().title("GitLab Tree").borders(Borders::ALL);
+    let message = loading_message(tick);
+    let paragraph = Paragraph::new(message).block(block);
+    frame.render_widget(paragraph, frame.size());
+}
+
+fn render_toast(frame: &mut ratatui::Frame, toast: &Toast) {
+    let area = frame.size();
+    let width = (toast.message.len() as u16).saturating_add(4);
+    let height = 3;
+    let x = area.width.saturating_sub(width + 1);
+    let y = 1;
+    let rect = Rect::new(x, y, width.min(area.width), height.min(area.height));
+    let block = Block::default().title("Notice").borders(Borders::ALL);
+    let paragraph = Paragraph::new(toast.message.clone()).block(block);
+    frame.render_widget(paragraph, rect);
+}
+
+struct LoadHandle {
+    receiver: mpsc::Receiver<Result<App>>,
+    tick: usize,
+}
+
+fn start_loader(config: Config) -> LoadHandle {
+    let (sender, receiver) = mpsc::channel();
+    thread::spawn(move || {
+        let result = App::from_gitlab(config);
+        let _ = sender.send(result);
+    });
+    LoadHandle { receiver, tick: 0 }
+}
+
+fn loading_message(tick: usize) -> String {
+    let frames = ["|", "/", "-", "\\"];
+    let frame = frames[tick % frames.len()];
+    format!("{frame} loading GitLab data...")
 }
 
 #[derive(Clone)]
 struct Config {
     gitlab_url: String,
     gitlab_token: String,
+    filters: ApiFilters,
 }
 
 impl Config {
@@ -165,16 +253,49 @@ impl Config {
         let gitlab_url =
             read_env_optional(&reader, "GITLAB_URL").unwrap_or_else(|| "https://gitlab.com".to_string());
         let gitlab_token = read_env_required(&reader, "GITLAB_TOKEN")?;
+        let filters = ApiFilters::from_env_reader(&reader)?;
 
         Ok(Self {
             gitlab_url,
             gitlab_token,
+            filters,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct ApiFilters {
+    all_available: Option<bool>,
+    owned: Option<bool>,
+    top_level_only: Option<bool>,
+    include_subgroups: Option<bool>,
+    visibility: Option<String>,
+    per_page: u16,
+}
+
+impl ApiFilters {
+    fn from_env_reader<F>(reader: &F) -> Result<Self>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let per_page = read_env_u16_optional(reader, "GITLAB_PER_PAGE")?.unwrap_or(100);
+        Ok(Self {
+            all_available: read_env_bool_optional(reader, "GITLAB_ALL_AVAILABLE")?,
+            owned: read_env_bool_optional(reader, "GITLAB_OWNED")?,
+            top_level_only: read_env_bool_optional(reader, "GITLAB_TOP_LEVEL_ONLY")?,
+            include_subgroups: read_env_bool_optional(reader, "GITLAB_INCLUDE_SUBGROUPS")?,
+            visibility: read_env_optional(reader, "GITLAB_VISIBILITY"),
+            per_page,
         })
     }
 }
 
 trait ClipboardSink {
     fn set_text(&mut self, text: String) -> Result<()>;
+}
+
+trait BrowserOpener {
+    fn open(&mut self, url: &str) -> Result<()>;
 }
 
 struct SystemClipboard {
@@ -194,6 +315,15 @@ impl ClipboardSink for SystemClipboard {
         self.inner
             .set_text(text)
             .map_err(|err| anyhow::anyhow!("clipboard write failed: {err}"))?;
+        Ok(())
+    }
+}
+
+struct SystemBrowser;
+
+impl BrowserOpener for SystemBrowser {
+    fn open(&mut self, url: &str) -> Result<()> {
+        open::that(url).map_err(|err| anyhow::anyhow!("open failed: {err}"))?;
         Ok(())
     }
 }
@@ -218,6 +348,17 @@ struct GroupProjects {
     projects: Vec<GitLabProject>,
 }
 
+#[derive(Debug, Deserialize)]
+struct GitLabUser {
+    username: String,
+}
+
+struct PersonalProjects {
+    username: String,
+    web_url: String,
+    projects: Vec<GitLabProject>,
+}
+
 fn fetch_groups(config: &Config) -> Result<Vec<GitLabGroup>> {
     let client = reqwest::blocking::Client::new();
     let base = config.gitlab_url.trim_end_matches('/');
@@ -226,14 +367,28 @@ fn fetch_groups(config: &Config) -> Result<Vec<GitLabGroup>> {
     let mut all = Vec::new();
 
     loop {
+        let mut query: Vec<(&str, String)> = vec![
+            ("per_page", config.filters.per_page.to_string()),
+            ("page", page.to_string()),
+            ("membership", "true".to_string()),
+        ];
+        if let Some(value) = config.filters.all_available {
+            query.push(("all_available", value.to_string()));
+        }
+        if let Some(value) = config.filters.owned {
+            query.push(("owned", value.to_string()));
+        }
+        if let Some(value) = config.filters.top_level_only {
+            query.push(("top_level_only", value.to_string()));
+        }
+        if let Some(value) = &config.filters.visibility {
+            query.push(("visibility", value.to_string()));
+        }
+
         let resp = client
             .get(&url)
             .header("PRIVATE-TOKEN", &config.gitlab_token)
-            .query(&[
-                ("per_page", "100"),
-                ("page", &page.to_string()),
-                ("membership", "true"),
-            ])
+            .query(&query)
             .send()?
             .error_for_status()?;
 
@@ -268,15 +423,22 @@ fn fetch_group_projects(config: &Config, group_id: usize) -> Result<Vec<GitLabPr
     let mut all = Vec::new();
 
     loop {
+        let mut query: Vec<(&str, String)> = vec![
+            ("per_page", config.filters.per_page.to_string()),
+            ("page", page.to_string()),
+            ("simple", "true".to_string()),
+        ];
+        if let Some(value) = config.filters.include_subgroups {
+            query.push(("include_subgroups", value.to_string()));
+        }
+        if let Some(value) = &config.filters.visibility {
+            query.push(("visibility", value.to_string()));
+        }
+
         let resp = client
             .get(&url)
             .header("PRIVATE-TOKEN", &config.gitlab_token)
-            .query(&[
-                ("per_page", "100"),
-                ("page", &page.to_string()),
-                ("simple", "true"),
-                ("include_subgroups", "false"),
-            ])
+            .query(&query)
             .send()?
             .error_for_status()?;
 
@@ -301,6 +463,79 @@ fn fetch_group_projects(config: &Config, group_id: usize) -> Result<Vec<GitLabPr
     }
 
     Ok(all)
+}
+
+fn fetch_current_user(config: &Config) -> Result<GitLabUser> {
+    let client = reqwest::blocking::Client::new();
+    let base = config.gitlab_url.trim_end_matches('/');
+    let url = format!("{base}/api/v4/user");
+    let user = client
+        .get(&url)
+        .header("PRIVATE-TOKEN", &config.gitlab_token)
+        .send()?
+        .error_for_status()?
+        .json::<GitLabUser>()?;
+    Ok(user)
+}
+
+fn fetch_owned_projects(config: &Config) -> Result<Vec<GitLabProject>> {
+    let client = reqwest::blocking::Client::new();
+    let base = config.gitlab_url.trim_end_matches('/');
+    let url = format!("{base}/api/v4/projects");
+    let mut page = 1usize;
+    let mut all = Vec::new();
+
+    loop {
+        let mut query: Vec<(&str, String)> = vec![
+            ("per_page", config.filters.per_page.to_string()),
+            ("page", page.to_string()),
+            ("simple", "true".to_string()),
+            ("owned", "true".to_string()),
+        ];
+        if let Some(value) = &config.filters.visibility {
+            query.push(("visibility", value.to_string()));
+        }
+
+        let resp = client
+            .get(&url)
+            .header("PRIVATE-TOKEN", &config.gitlab_token)
+            .query(&query)
+            .send()?
+            .error_for_status()?;
+
+        let next_page = resp
+            .headers()
+            .get("x-next-page")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        let mut page_projects: Vec<GitLabProject> = resp.json()?;
+        all.append(&mut page_projects);
+
+        if next_page.is_empty() {
+            break;
+        }
+
+        page = next_page
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid x-next-page header: {next_page}"))?;
+    }
+
+    Ok(all)
+}
+
+fn fetch_personal_projects(config: &Config) -> Result<PersonalProjects> {
+    let user = fetch_current_user(config)?;
+    let projects = fetch_owned_projects(config)?;
+    let base = config.gitlab_url.trim_end_matches('/');
+    let web_url = format!("{base}/{}", user.username);
+    Ok(PersonalProjects {
+        username: user.username,
+        web_url,
+        projects,
+    })
 }
 
 fn fetch_projects_by_group(
@@ -334,6 +569,34 @@ where
     }
 }
 
+fn read_env_bool_optional<F>(reader: &F, key: &str) -> Result<Option<bool>>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(value) = read_env_optional(reader, key) else {
+        return Ok(None);
+    };
+    let normalized = value.to_lowercase();
+    match normalized.as_str() {
+        "1" | "true" | "yes" | "on" => Ok(Some(true)),
+        "0" | "false" | "no" | "off" => Ok(Some(false)),
+        _ => anyhow::bail!("invalid boolean for {key}: {value}"),
+    }
+}
+
+fn read_env_u16_optional<F>(reader: &F, key: &str) -> Result<Option<u16>>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let Some(value) = read_env_optional(reader, key) else {
+        return Ok(None);
+    };
+    let parsed = value
+        .parse::<u16>()
+        .map_err(|_| anyhow::anyhow!("invalid integer for {key}: {value}"))?;
+    Ok(Some(parsed))
+}
+
 #[derive(Clone)]
 struct Node {
     name: String,
@@ -349,6 +612,11 @@ enum NodeKind {
     Project,
 }
 
+struct Toast {
+    message: String,
+    remaining: u8,
+}
+
 struct App {
     nodes: Vec<Node>,
     roots: Vec<usize>,
@@ -357,9 +625,12 @@ struct App {
     config: Config,
     status: Option<String>,
     pending_g: bool,
+    toast: Option<Toast>,
 }
 
 impl App {
+    const TOAST_TTL: u8 = 10;
+
     fn sample_with_status(config: Config, status: String) -> Self {
         let mut nodes = Vec::new();
 
@@ -506,20 +777,35 @@ impl App {
             config,
             status: Some(status),
             pending_g: false,
+            toast: None,
         }
     }
 
     fn from_gitlab(config: Config) -> Result<Self> {
         let groups = fetch_groups(&config)?;
         let projects = fetch_projects_by_group(&config, &groups)?;
+        let personal = fetch_personal_projects(&config).ok();
         let total_projects: usize = projects.iter().map(|entry| entry.projects.len()).sum();
-        let status = format!("groups: {}, projects: {}", groups.len(), total_projects);
-        Ok(Self::from_gitlab_data(groups, projects, config, status))
+        let personal_count = personal.as_ref().map(|entry| entry.projects.len()).unwrap_or(0);
+        let status = format!(
+            "groups: {}, projects: {}, personal: {}",
+            groups.len(),
+            total_projects,
+            personal_count
+        );
+        Ok(Self::from_gitlab_data(
+            groups,
+            projects,
+            personal,
+            config,
+            status,
+        ))
     }
 
     fn from_gitlab_data(
         groups: Vec<GitLabGroup>,
         projects_by_group: Vec<GroupProjects>,
+        personal: Option<PersonalProjects>,
         config: Config,
         status: String,
     ) -> Self {
@@ -556,6 +842,16 @@ impl App {
             }
         }
 
+        if let Some(personal) = personal {
+            let root = push_node(&mut nodes, &personal.username, NodeKind::Group, &personal.web_url);
+            for project in personal.projects {
+                let project_node =
+                    push_node(&mut nodes, &project.name, NodeKind::Project, &project.web_url);
+                nodes[root].children.push(project_node);
+            }
+            roots.push(root);
+        }
+
         for &root in &roots {
             nodes[root].expanded = true;
         }
@@ -570,6 +866,7 @@ impl App {
             config,
             status: Some(status),
             pending_g: false,
+            toast: None,
         }
     }
 
@@ -671,8 +968,40 @@ impl App {
         Ok(url)
     }
 
+    fn open_selected<B: BrowserOpener>(
+        &mut self,
+        visible: &[VisibleNode],
+        browser: &mut B,
+    ) -> Result<String> {
+        if visible.is_empty() {
+            anyhow::bail!("no selection");
+        }
+        let node_id = visible[self.selected].id;
+        let url = self.nodes[node_id].url.clone();
+        browser.open(&url)?;
+        Ok(url)
+    }
+
     fn set_status(&mut self, message: String) {
         self.status = Some(message);
+    }
+
+    fn set_toast(&mut self, message: String) {
+        self.toast = Some(Toast {
+            message,
+            remaining: Self::TOAST_TTL,
+        });
+    }
+
+    fn tick_toast(&mut self) {
+        if let Some(toast) = self.toast.as_mut() {
+            if toast.remaining > 0 {
+                toast.remaining -= 1;
+            }
+            if toast.remaining == 0 {
+                self.toast = None;
+            }
+        }
     }
 
     fn set_pending_g(&mut self) {
@@ -740,9 +1069,11 @@ mod tests {
             config: Config {
                 gitlab_url: "https://gitlab.com".to_string(),
                 gitlab_token: "token".to_string(),
+                filters: ApiFilters::default(),
             },
             status: None,
             pending_g: false,
+            toast: None,
         };
 
         let visible = app.visible_nodes();
@@ -766,6 +1097,8 @@ mod tests {
         let config = Config::from_env_reader(reader).expect("config should load");
         assert_eq!(config.gitlab_url, "https://gitlab.com");
         assert_eq!(config.gitlab_token, "token");
+        assert_eq!(config.filters.per_page, 100);
+        assert!(config.filters.all_available.is_none());
     }
 
     #[test]
@@ -773,6 +1106,49 @@ mod tests {
         let reader = |_key: &str| None;
         let result = Config::from_env_reader(reader);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_from_env_reader_parses_filters() {
+        let reader = |key: &str| match key {
+            "GITLAB_TOKEN" => Some("token".to_string()),
+            "GITLAB_ALL_AVAILABLE" => Some("true".to_string()),
+            "GITLAB_OWNED" => Some("0".to_string()),
+            "GITLAB_TOP_LEVEL_ONLY" => Some("yes".to_string()),
+            "GITLAB_INCLUDE_SUBGROUPS" => Some("on".to_string()),
+            "GITLAB_VISIBILITY" => Some("private".to_string()),
+            "GITLAB_PER_PAGE" => Some("50".to_string()),
+            _ => None,
+        };
+
+        let config = Config::from_env_reader(reader).expect("config should load");
+        assert_eq!(config.filters.per_page, 50);
+        assert_eq!(config.filters.all_available, Some(true));
+        assert_eq!(config.filters.owned, Some(false));
+        assert_eq!(config.filters.top_level_only, Some(true));
+        assert_eq!(config.filters.include_subgroups, Some(true));
+        assert_eq!(config.filters.visibility.as_deref(), Some("private"));
+    }
+
+    #[test]
+    fn config_from_env_reader_rejects_invalid_bool() {
+        let reader = |key: &str| match key {
+            "GITLAB_TOKEN" => Some("token".to_string()),
+            "GITLAB_OWNED" => Some("maybe".to_string()),
+            _ => None,
+        };
+
+        let result = Config::from_env_reader(reader);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn loading_message_cycles_frames() {
+        assert_eq!(loading_message(0), "| loading GitLab data...");
+        assert_eq!(loading_message(1), "/ loading GitLab data...");
+        assert_eq!(loading_message(2), "- loading GitLab data...");
+        assert_eq!(loading_message(3), "\\ loading GitLab data...");
+        assert_eq!(loading_message(4), "| loading GitLab data...");
     }
 
     #[test]
@@ -802,9 +1178,11 @@ mod tests {
         let app = App::from_gitlab_data(
             groups,
             projects,
+            None,
             Config {
                 gitlab_url: "https://gitlab.com".to_string(),
                 gitlab_token: "token".to_string(),
+                filters: ApiFilters::default(),
             },
             "groups: 2".to_string(),
         );
@@ -825,6 +1203,38 @@ mod tests {
     }
 
     #[test]
+    fn from_gitlab_data_adds_personal_projects_root() {
+        let personal = PersonalProjects {
+            username: "alice".to_string(),
+            web_url: "https://example.com/alice".to_string(),
+            projects: vec![GitLabProject {
+                name: "notes".to_string(),
+                web_url: "https://example.com/alice/notes".to_string(),
+            }],
+        };
+
+        let app = App::from_gitlab_data(
+            Vec::new(),
+            Vec::new(),
+            Some(personal),
+            Config {
+                gitlab_url: "https://gitlab.com".to_string(),
+                gitlab_token: "token".to_string(),
+                filters: ApiFilters::default(),
+            },
+            "personal: 1".to_string(),
+        );
+
+        assert_eq!(app.roots.len(), 1);
+        let root_id = app.roots[0];
+        assert_eq!(app.nodes[root_id].name, "alice");
+        assert_eq!(app.nodes[root_id].children.len(), 1);
+        let project_id = app.nodes[root_id].children[0];
+        assert_eq!(app.nodes[project_id].name, "notes");
+        assert_eq!(app.parent[project_id], Some(root_id));
+    }
+
+    #[test]
     fn vim_navigation_helpers_update_selection() {
         let mut nodes = Vec::new();
         let root = push_node(&mut nodes, "root", NodeKind::Group, "https://example.com/root");
@@ -841,9 +1251,11 @@ mod tests {
             config: Config {
                 gitlab_url: "https://gitlab.com".to_string(),
                 gitlab_token: "token".to_string(),
+                filters: ApiFilters::default(),
             },
             status: None,
             pending_g: false,
+            toast: None,
         };
 
         app.move_top();
@@ -863,9 +1275,11 @@ mod tests {
             config: Config {
                 gitlab_url: "https://gitlab.com".to_string(),
                 gitlab_token: "token".to_string(),
+                filters: ApiFilters::default(),
             },
             status: None,
             pending_g: false,
+            toast: None,
         };
 
         assert!(!app.consume_pending_g());
@@ -887,9 +1301,11 @@ mod tests {
             config: Config {
                 gitlab_url: "https://gitlab.com".to_string(),
                 gitlab_token: "token".to_string(),
+                filters: ApiFilters::default(),
             },
             status: None,
             pending_g: false,
+            toast: None,
         };
 
         let visible = app.visible_nodes();
@@ -902,6 +1318,61 @@ mod tests {
         assert_eq!(clipboard.text.as_deref(), Some("https://example.com/root"));
     }
 
+    #[test]
+    fn open_selected_opens_url() {
+        let mut nodes = Vec::new();
+        let root = push_node(&mut nodes, "root", NodeKind::Group, "https://example.com/root");
+        let parent = build_parent_map(&nodes);
+        let mut app = App {
+            nodes,
+            roots: vec![root],
+            parent,
+            selected: 0,
+            config: Config {
+                gitlab_url: "https://gitlab.com".to_string(),
+                gitlab_token: "token".to_string(),
+                filters: ApiFilters::default(),
+            },
+            status: None,
+            pending_g: false,
+            toast: None,
+        };
+
+        let visible = app.visible_nodes();
+        let mut browser = MockBrowser { opened: None };
+        let url = app
+            .open_selected(&visible, &mut browser)
+            .expect("open should succeed");
+
+        assert_eq!(url, "https://example.com/root");
+        assert_eq!(browser.opened.as_deref(), Some("https://example.com/root"));
+    }
+
+    #[test]
+    fn toast_expires_after_ticks() {
+        let mut app = App {
+            nodes: Vec::new(),
+            roots: Vec::new(),
+            parent: Vec::new(),
+            selected: 0,
+            config: Config {
+                gitlab_url: "https://gitlab.com".to_string(),
+                gitlab_token: "token".to_string(),
+                filters: ApiFilters::default(),
+            },
+            status: None,
+            pending_g: false,
+            toast: None,
+        };
+
+        app.set_toast("Copied URL".to_string());
+        for _ in 0..App::TOAST_TTL {
+            app.tick_toast();
+        }
+
+        assert!(app.toast.is_none());
+    }
+
     struct MockClipboard {
         text: Option<String>,
     }
@@ -909,6 +1380,17 @@ mod tests {
     impl ClipboardSink for MockClipboard {
         fn set_text(&mut self, text: String) -> Result<()> {
             self.text = Some(text);
+            Ok(())
+        }
+    }
+
+    struct MockBrowser {
+        opened: Option<String>,
+    }
+
+    impl BrowserOpener for MockBrowser {
+        fn open(&mut self, url: &str) -> Result<()> {
+            self.opened = Some(url.to_string());
             Ok(())
         }
     }
