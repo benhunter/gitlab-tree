@@ -57,7 +57,22 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, config: Config
                     KeyCode::Down => app.move_down(visible.len()),
                     KeyCode::Left => app.collapse_or_parent(&visible),
                     KeyCode::Right => app.expand_or_child(&visible),
+                    KeyCode::Char('k') => app.move_up(),
+                    KeyCode::Char('j') => app.move_down(visible.len()),
+                    KeyCode::Char('h') => app.collapse_or_parent(&visible),
+                    KeyCode::Char('l') => app.expand_or_child(&visible),
+                    KeyCode::Char('g') => {
+                        if app.consume_pending_g() {
+                            app.move_top();
+                        } else {
+                            app.set_pending_g();
+                        }
+                    }
+                    KeyCode::Char('G') => app.move_bottom(visible.len()),
                     _ => {}
+                }
+                if key.code != KeyCode::Char('g') {
+                    app.clear_pending_g();
                 }
             }
         }
@@ -301,6 +316,7 @@ struct App {
     selected: usize,
     config: Config,
     status: Option<String>,
+    pending_g: bool,
 }
 
 impl App {
@@ -354,6 +370,7 @@ impl App {
             selected: 0,
             config,
             status: Some(status),
+            pending_g: false,
         }
     }
 
@@ -416,6 +433,7 @@ impl App {
             selected: 0,
             config,
             status: Some(status),
+            pending_g: false,
         }
     }
 
@@ -457,6 +475,16 @@ impl App {
         }
     }
 
+    fn move_top(&mut self) {
+        self.selected = 0;
+    }
+
+    fn move_bottom(&mut self, visible_len: usize) {
+        if visible_len > 0 {
+            self.selected = visible_len - 1;
+        }
+    }
+
     fn collapse_or_parent(&mut self, visible: &[VisibleNode]) {
         if visible.is_empty() {
             return;
@@ -490,6 +518,23 @@ impl App {
     fn select_node(&mut self, node_id: usize, visible: &[VisibleNode]) {
         if let Some(pos) = visible.iter().position(|item| item.id == node_id) {
             self.selected = pos;
+        }
+    }
+
+    fn set_pending_g(&mut self) {
+        self.pending_g = true;
+    }
+
+    fn clear_pending_g(&mut self) {
+        self.pending_g = false;
+    }
+
+    fn consume_pending_g(&mut self) -> bool {
+        if self.pending_g {
+            self.pending_g = false;
+            true
+        } else {
+            false
         }
     }
 }
@@ -542,6 +587,7 @@ mod tests {
                 gitlab_token: "token".to_string(),
             },
             status: None,
+            pending_g: false,
         };
 
         let visible = app.visible_nodes();
@@ -618,5 +664,55 @@ mod tests {
         assert_eq!(app.nodes[project_id].name, "proj");
         assert_eq!(app.parent[child_id], Some(root_id));
         assert_eq!(app.parent[project_id], Some(root_id));
+    }
+
+    #[test]
+    fn vim_navigation_helpers_update_selection() {
+        let mut nodes = Vec::new();
+        let root = push_node(&mut nodes, "root", NodeKind::Group);
+        let child = push_node(&mut nodes, "child", NodeKind::Project);
+        nodes[root].children.push(child);
+        nodes[root].expanded = true;
+
+        let parent = build_parent_map(&nodes);
+        let mut app = App {
+            nodes,
+            roots: vec![root],
+            parent,
+            selected: 1,
+            config: Config {
+                gitlab_url: "https://gitlab.com".to_string(),
+                gitlab_token: "token".to_string(),
+            },
+            status: None,
+            pending_g: false,
+        };
+
+        app.move_top();
+        assert_eq!(app.selected, 0);
+
+        app.move_bottom(2);
+        assert_eq!(app.selected, 1);
+    }
+
+    #[test]
+    fn vim_navigation_pending_g_toggles() {
+        let mut app = App {
+            nodes: Vec::new(),
+            roots: Vec::new(),
+            parent: Vec::new(),
+            selected: 0,
+            config: Config {
+                gitlab_url: "https://gitlab.com".to_string(),
+                gitlab_token: "token".to_string(),
+            },
+            status: None,
+            pending_g: false,
+        };
+
+        assert!(!app.consume_pending_g());
+        app.set_pending_g();
+        assert!(app.consume_pending_g());
+        assert!(!app.consume_pending_g());
     }
 }
