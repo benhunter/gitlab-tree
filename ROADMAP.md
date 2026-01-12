@@ -9,11 +9,11 @@
 - Show personal projects in the tree using the username as the top-level group.
 - Show a toast notification after yanking a URL to the clipboard.
 - Show project metadata (path, visibility, last activity) in the UI.
+- Add search and fuzzy filtering across groups/projects.
 
 ## Near Term
 - TBD.
 - Expand/contract the tree by pressing Enter.
 
 ## Future
-- Add search and fuzzy filtering across groups/projects.
 - Cache API responses to speed up startup.

@@ -76,42 +76,54 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, config: Config
 
             if event::poll(Duration::from_millis(200))? {
                 if let Event::Key(key) = event::read()? {
-                    match key.code {
-                        KeyCode::Char('q') => return Ok(()),
-                        KeyCode::Up => app.move_up(),
-                        KeyCode::Down => app.move_down(visible.len()),
-                        KeyCode::Left => app.collapse_or_parent(&visible),
-                        KeyCode::Right => app.expand_or_child(&visible),
-                        KeyCode::Char('k') => app.move_up(),
-                        KeyCode::Char('j') => app.move_down(visible.len()),
-                        KeyCode::Char('h') => app.collapse_or_parent(&visible),
-                        KeyCode::Char('l') => app.expand_or_child(&visible),
-                        KeyCode::Char('g') => {
-                            if app.consume_pending_g() {
-                                app.move_top();
-                            } else {
-                                app.set_pending_g();
-                            }
+                    if app.search_mode {
+                        match key.code {
+                            KeyCode::Esc => app.clear_search(),
+                            KeyCode::Enter => app.exit_search_mode(),
+                            KeyCode::Backspace => app.pop_search_char(),
+                            KeyCode::Char(ch) => app.push_search_char(ch),
+                            _ => {}
                         }
-                        KeyCode::Char('G') => app.move_bottom(visible.len()),
-                        KeyCode::Char('y') => {
-                            if let Some(clipboard) = clipboard.as_mut() {
-                                match app.yank_selected(&visible, clipboard) {
-                                    Ok(url) => {
-                                        app.set_status(format!("copied {url}"));
-                                        app.set_toast("Copied URL".to_string());
-                                    }
-                                    Err(err) => app.set_status(format!("copy failed: {err}")),
+                    } else {
+                        match key.code {
+                            KeyCode::Char('q') => return Ok(()),
+                            KeyCode::Up => app.move_up(),
+                            KeyCode::Down => app.move_down(visible.len()),
+                            KeyCode::Left => app.collapse_or_parent(&visible),
+                            KeyCode::Right => app.expand_or_child(&visible),
+                            KeyCode::Char('k') => app.move_up(),
+                            KeyCode::Char('j') => app.move_down(visible.len()),
+                            KeyCode::Char('h') => app.collapse_or_parent(&visible),
+                            KeyCode::Char('l') => app.expand_or_child(&visible),
+                            KeyCode::Char('g') => {
+                                if app.consume_pending_g() {
+                                    app.move_top();
+                                } else {
+                                    app.set_pending_g();
                                 }
-                            } else {
-                                app.set_status("clipboard unavailable".to_string());
                             }
+                            KeyCode::Char('G') => app.move_bottom(visible.len()),
+                            KeyCode::Char('y') => {
+                                if let Some(clipboard) = clipboard.as_mut() {
+                                    match app.yank_selected(&visible, clipboard) {
+                                        Ok(url) => {
+                                            app.set_status(format!("copied {url}"));
+                                            app.set_toast("Copied URL".to_string());
+                                        }
+                                        Err(err) => app.set_status(format!("copy failed: {err}")),
+                                    }
+                                } else {
+                                    app.set_status("clipboard unavailable".to_string());
+                                }
+                            }
+                            KeyCode::Char('o') => match app.open_selected(&visible, &mut browser) {
+                                Ok(url) => app.set_status(format!("opened {url}")),
+                                Err(err) => app.set_status(format!("open failed: {err}")),
+                            },
+                            KeyCode::Char('/') => app.start_search(),
+                            KeyCode::Esc => app.clear_search(),
+                            _ => {}
                         }
-                        KeyCode::Char('o') => match app.open_selected(&visible, &mut browser) {
-                            Ok(url) => app.set_status(format!("opened {url}")),
-                            Err(err) => app.set_status(format!("open failed: {err}")),
-                        },
-                        _ => {}
                     }
                     if key.code != KeyCode::Char('g') {
                         app.clear_pending_g();
@@ -196,11 +208,15 @@ fn ui(
         "token: set"
     };
     let mut footer = format!(
-        "q quit | up/down move | right expand | left collapse | y yank | o open | {} | {}",
+        "q quit | up/down move | right expand | left collapse | y yank | o open | / search | {} | {}",
         app.config.gitlab_url, token_state
     );
     if let Some(status) = &app.status {
         footer.push_str(&format!(" | {status}"));
+    }
+    if let Some(query) = &app.search_query {
+        let label = if app.search_mode { "search*" } else { "search" };
+        footer.push_str(&format!(" | {label}: {query}"));
     }
     let help = Paragraph::new(footer);
     frame.render_widget(help, chunks[1]);
@@ -667,6 +683,8 @@ struct App {
     status: Option<String>,
     pending_g: bool,
     toast: Option<Toast>,
+    search_query: Option<String>,
+    search_mode: bool,
 }
 
 impl App {
@@ -876,6 +894,8 @@ impl App {
             status: Some(status),
             pending_g: false,
             toast: None,
+            search_query: None,
+            search_mode: false,
         }
     }
 
@@ -995,6 +1015,8 @@ impl App {
             status: Some(status),
             pending_g: false,
             toast: None,
+            search_query: None,
+            search_mode: false,
         }
     }
 
@@ -1003,7 +1025,11 @@ impl App {
         for &root in &self.roots {
             self.walk_visible(root, 0, &mut out);
         }
-        out
+        if let Some(query) = &self.search_query {
+            filter_visible_nodes(&out, &self.nodes, query)
+        } else {
+            out
+        }
     }
 
     fn walk_visible(&self, node_id: usize, depth: usize, out: &mut Vec<VisibleNode>) {
@@ -1148,8 +1174,45 @@ impl App {
             false
         }
     }
+
+    fn start_search(&mut self) {
+        self.search_mode = true;
+        self.search_query = Some(String::new());
+    }
+
+    fn exit_search_mode(&mut self) {
+        self.search_mode = false;
+        if let Some(query) = &self.search_query {
+            if query.is_empty() {
+                self.search_query = None;
+            }
+        }
+    }
+
+    fn clear_search(&mut self) {
+        self.search_query = None;
+        self.search_mode = false;
+    }
+
+    fn push_search_char(&mut self, ch: char) {
+        if let Some(query) = &mut self.search_query {
+            query.push(ch);
+        } else {
+            self.search_query = Some(ch.to_string());
+        }
+    }
+
+    fn pop_search_char(&mut self) {
+        if let Some(query) = &mut self.search_query {
+            query.pop();
+            if query.is_empty() && !self.search_mode {
+                self.search_query = None;
+            }
+        }
+    }
 }
 
+#[derive(Clone, Copy)]
 struct VisibleNode {
     id: usize,
     depth: usize,
@@ -1186,6 +1249,40 @@ fn build_parent_map(nodes: &[Node]) -> Vec<Option<usize>> {
         }
     }
     parent
+}
+
+fn filter_visible_nodes(
+    visible: &[VisibleNode],
+    nodes: &[Node],
+    query: &str,
+) -> Vec<VisibleNode> {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return visible.to_vec();
+    }
+    visible
+        .iter()
+        .copied()
+        .filter(|node| fuzzy_match(&needle, &nodes[node.id].name.to_lowercase()))
+        .collect()
+}
+
+fn fuzzy_match(needle: &str, haystack: &str) -> bool {
+    let mut needle_chars = needle.chars();
+    let mut current = needle_chars.next();
+    for ch in haystack.chars() {
+        match current {
+            Some(target) if ch == target => {
+                current = needle_chars.next();
+                if current.is_none() {
+                    return true;
+                }
+            }
+            None => return true,
+            _ => {}
+        }
+    }
+    current.is_none()
 }
 
 #[cfg(test)]
@@ -1229,6 +1326,8 @@ mod tests {
             status: None,
             pending_g: false,
             toast: None,
+            search_query: None,
+            search_mode: false,
         };
 
         let visible = app.visible_nodes();
@@ -1345,6 +1444,59 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| line == "Last activity: 2024-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn filter_visible_nodes_matches_query_case_insensitive() {
+        let nodes = vec![
+            Node {
+                name: "API".to_string(),
+                kind: NodeKind::Project,
+                children: Vec::new(),
+                expanded: false,
+                url: "https://example.com/api".to_string(),
+                path: "root/api".to_string(),
+                visibility: "private".to_string(),
+                last_activity: None,
+            },
+            Node {
+                name: "web".to_string(),
+                kind: NodeKind::Project,
+                children: Vec::new(),
+                expanded: false,
+                url: "https://example.com/web".to_string(),
+                path: "root/web".to_string(),
+                visibility: "private".to_string(),
+                last_activity: None,
+            },
+        ];
+        let visible = vec![
+            VisibleNode { id: 0, depth: 0 },
+            VisibleNode { id: 1, depth: 0 },
+        ];
+
+        let filtered = filter_visible_nodes(&visible, &nodes, "api");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, 0);
+    }
+
+    #[test]
+    fn filter_visible_nodes_matches_fuzzy_subsequence() {
+        let nodes = vec![Node {
+            name: "gitlab".to_string(),
+            kind: NodeKind::Project,
+            children: Vec::new(),
+            expanded: false,
+            url: "https://example.com/gitlab".to_string(),
+            path: "root/gitlab".to_string(),
+            visibility: "private".to_string(),
+            last_activity: None,
+        }];
+        let visible = vec![VisibleNode { id: 0, depth: 0 }];
+
+        let filtered = filter_visible_nodes(&visible, &nodes, "glb");
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].id, 0);
     }
 
     #[test]
@@ -1478,6 +1630,8 @@ mod tests {
             status: None,
             pending_g: false,
             toast: None,
+            search_query: None,
+            search_mode: false,
         };
 
         app.move_top();
@@ -1502,6 +1656,8 @@ mod tests {
             status: None,
             pending_g: false,
             toast: None,
+            search_query: None,
+            search_mode: false,
         };
 
         assert!(!app.consume_pending_g());
@@ -1536,6 +1692,8 @@ mod tests {
             status: None,
             pending_g: false,
             toast: None,
+            search_query: None,
+            search_mode: false,
         };
 
         let visible = app.visible_nodes();
@@ -1574,6 +1732,8 @@ mod tests {
             status: None,
             pending_g: false,
             toast: None,
+            search_query: None,
+            search_mode: false,
         };
 
         let visible = app.visible_nodes();
@@ -1601,6 +1761,8 @@ mod tests {
             status: None,
             pending_g: false,
             toast: None,
+            search_query: None,
+            search_mode: false,
         };
 
         app.set_toast("Copied URL".to_string());

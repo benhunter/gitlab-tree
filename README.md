@@ -2,6 +2,7 @@
 
 Ratatui-based CLI to explore GitLab groups and projects as a tree.
 The right-hand details pane shows metadata like path, visibility, and last activity.
+Use `/` to filter the tree by name with fuzzy matching.
 
 ## Requirements
 
@@ -42,3 +43,6 @@ GITLAB_URL=https://gitlab.example.com GITLAB_TOKEN=... cargo run
 - `G`: jump to bottom
 - `y`: copy selected group/project URL to clipboard
 - `o`: open selected group/project in your browser
+- `/`: enter search mode
+- `enter`: apply search
+- `esc`: clear search
