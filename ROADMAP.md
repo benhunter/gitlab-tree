@@ -7,9 +7,11 @@
   - Pagination controls for large instances
 - Open the selected group/project in the system web browser.
 - Copy the selected group/project URL to the clipboard.
-- Add Vim-style navigation keybinds (e.g., `j/k`, `h/l`, `gg`, `G`).
 - Show a loading view while fetching GitLab data to avoid a blank screen.
 - Show personal projects in the tree using the username as the top-level group.
+
+## Completed
+- Add Vim-style navigation keybinds (e.g., `j/k`, `h/l`, `gg`, `G`).
 
 ## Future
 - Show project metadata (path, visibility, last activity) in the UI.
