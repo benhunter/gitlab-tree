@@ -119,9 +119,16 @@ struct Config {
 
 impl Config {
     fn from_env() -> Result<Self> {
+        Self::from_env_reader(|key| env::var(key).ok())
+    }
+
+    fn from_env_reader<F>(reader: F) -> Result<Self>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
         let gitlab_url =
-            read_env_optional("GITLAB_URL").unwrap_or_else(|| "https://gitlab.com".to_string());
-        let gitlab_token = read_env_required("GITLAB_TOKEN")?;
+            read_env_optional(&reader, "GITLAB_URL").unwrap_or_else(|| "https://gitlab.com".to_string());
+        let gitlab_token = read_env_required(&reader, "GITLAB_TOKEN")?;
 
         Ok(Self {
             gitlab_url,
@@ -130,17 +137,20 @@ impl Config {
     }
 }
 
-fn read_env_optional(key: &str) -> Option<String> {
-    match env::var(key) {
-        Ok(value) if !value.trim().is_empty() => Some(value),
-        _ => None,
-    }
+fn read_env_optional<F>(reader: &F, key: &str) -> Option<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    reader(key).filter(|value| !value.trim().is_empty())
 }
 
-fn read_env_required(key: &str) -> Result<String> {
-    match env::var(key) {
-        Ok(value) if !value.trim().is_empty() => Ok(value),
-        _ => anyhow::bail!("missing required environment variable: {key}"),
+fn read_env_required<F>(reader: &F, key: &str) -> Result<String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    match read_env_optional(reader, key) {
+        Some(value) => Ok(value),
+        None => anyhow::bail!("missing required environment variable: {key}"),
     }
 }
 
@@ -318,4 +328,58 @@ fn build_parent_map(nodes: &[Node]) -> Vec<Option<usize>> {
         }
     }
     parent
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visible_nodes_respects_expansion() {
+        let mut nodes = Vec::new();
+        let root = push_node(&mut nodes, "root", NodeKind::Group);
+        let child = push_node(&mut nodes, "child", NodeKind::Project);
+        nodes[root].children.push(child);
+
+        let parent = build_parent_map(&nodes);
+        let mut app = App {
+            nodes,
+            roots: vec![root],
+            parent,
+            selected: 0,
+            config: Config {
+                gitlab_url: "https://gitlab.com".to_string(),
+                gitlab_token: "token".to_string(),
+            },
+        };
+
+        let visible = app.visible_nodes();
+        assert_eq!(visible.len(), 1);
+        assert_eq!(visible[0].id, root);
+
+        app.nodes[root].expanded = true;
+        let visible = app.visible_nodes();
+        assert_eq!(visible.len(), 2);
+        assert_eq!(visible[0].id, root);
+        assert_eq!(visible[1].id, child);
+    }
+
+    #[test]
+    fn config_from_env_reader_requires_token_and_defaults_url() {
+        let reader = |key: &str| match key {
+            "GITLAB_TOKEN" => Some("token".to_string()),
+            _ => None,
+        };
+
+        let config = Config::from_env_reader(reader).expect("config should load");
+        assert_eq!(config.gitlab_url, "https://gitlab.com");
+        assert_eq!(config.gitlab_token, "token");
+    }
+
+    #[test]
+    fn config_from_env_reader_fails_without_token() {
+        let reader = |_key: &str| None;
+        let result = Config::from_env_reader(reader);
+        assert!(result.is_err());
+    }
 }
