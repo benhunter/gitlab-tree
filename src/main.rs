@@ -1,6 +1,7 @@
 use std::{collections::HashMap, env, io, time::Duration};
 
 use anyhow::Result;
+use arboard::Clipboard as SystemClipboardHandle;
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
@@ -43,6 +44,7 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, config: Config
         Ok(app) => app,
         Err(err) => App::sample_with_status(config, format!("load error: {err}")),
     };
+    let mut clipboard = SystemClipboard::new().ok();
     loop {
         let visible = app.visible_nodes();
         app.ensure_selection(visible.len());
@@ -69,6 +71,16 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, config: Config
                         }
                     }
                     KeyCode::Char('G') => app.move_bottom(visible.len()),
+                    KeyCode::Char('y') => {
+                        if let Some(clipboard) = clipboard.as_mut() {
+                            match app.yank_selected(&visible, clipboard) {
+                                Ok(url) => app.set_status(format!("copied {url}")),
+                                Err(err) => app.set_status(format!("copy failed: {err}")),
+                            }
+                        } else {
+                            app.set_status("clipboard unavailable".to_string());
+                        }
+                    }
                     _ => {}
                 }
                 if key.code != KeyCode::Char('g') {
@@ -125,7 +137,7 @@ fn ui(
         "token: set"
     };
     let mut footer = format!(
-        "q quit | up/down move | right expand | left collapse | {} | {}",
+        "q quit | up/down move | right expand | left collapse | y yank | {} | {}",
         app.config.gitlab_url, token_state
     );
     if let Some(status) = &app.status {
@@ -161,10 +173,36 @@ impl Config {
     }
 }
 
+trait ClipboardSink {
+    fn set_text(&mut self, text: String) -> Result<()>;
+}
+
+struct SystemClipboard {
+    inner: SystemClipboardHandle,
+}
+
+impl SystemClipboard {
+    fn new() -> Result<Self> {
+        let inner = SystemClipboardHandle::new()
+            .map_err(|err| anyhow::anyhow!("clipboard init failed: {err}"))?;
+        Ok(Self { inner })
+    }
+}
+
+impl ClipboardSink for SystemClipboard {
+    fn set_text(&mut self, text: String) -> Result<()> {
+        self.inner
+            .set_text(text)
+            .map_err(|err| anyhow::anyhow!("clipboard write failed: {err}"))?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct GitLabGroup {
     id: usize,
     name: String,
+    web_url: String,
     #[serde(default)]
     parent_id: Option<usize>,
 }
@@ -172,6 +210,7 @@ struct GitLabGroup {
 #[derive(Debug, Deserialize)]
 struct GitLabProject {
     name: String,
+    web_url: String,
 }
 
 struct GroupProjects {
@@ -301,6 +340,7 @@ struct Node {
     kind: NodeKind,
     children: Vec<usize>,
     expanded: bool,
+    url: String,
 }
 
 #[derive(Clone, Copy)]
@@ -323,38 +363,133 @@ impl App {
     fn sample_with_status(config: Config, status: String) -> Self {
         let mut nodes = Vec::new();
 
-        let dev_platform = push_node(&mut nodes, "dev-platform", NodeKind::Group);
-        let data = push_node(&mut nodes, "data", NodeKind::Group);
-        let sec = push_node(&mut nodes, "security", NodeKind::Group);
+        let dev_platform = push_node(
+            &mut nodes,
+            "dev-platform",
+            NodeKind::Group,
+            "https://gitlab.example.com/dev-platform",
+        );
+        let data = push_node(
+            &mut nodes,
+            "data",
+            NodeKind::Group,
+            "https://gitlab.example.com/data",
+        );
+        let sec = push_node(
+            &mut nodes,
+            "security",
+            NodeKind::Group,
+            "https://gitlab.example.com/security",
+        );
 
-        let dev_backend = push_node(&mut nodes, "backend", NodeKind::Group);
-        let dev_frontend = push_node(&mut nodes, "frontend", NodeKind::Group);
-        let dev_platform_proj = push_node(&mut nodes, "platform-tools", NodeKind::Project);
+        let dev_backend = push_node(
+            &mut nodes,
+            "backend",
+            NodeKind::Group,
+            "https://gitlab.example.com/dev-platform/backend",
+        );
+        let dev_frontend = push_node(
+            &mut nodes,
+            "frontend",
+            NodeKind::Group,
+            "https://gitlab.example.com/dev-platform/frontend",
+        );
+        let dev_platform_proj = push_node(
+            &mut nodes,
+            "platform-tools",
+            NodeKind::Project,
+            "https://gitlab.example.com/dev-platform/platform-tools",
+        );
         nodes[dev_platform].children.extend([dev_backend, dev_frontend, dev_platform_proj]);
 
-        let api = push_node(&mut nodes, "api", NodeKind::Project);
-        let auth = push_node(&mut nodes, "auth", NodeKind::Project);
+        let api = push_node(
+            &mut nodes,
+            "api",
+            NodeKind::Project,
+            "https://gitlab.example.com/dev-platform/backend/api",
+        );
+        let auth = push_node(
+            &mut nodes,
+            "auth",
+            NodeKind::Project,
+            "https://gitlab.example.com/dev-platform/backend/auth",
+        );
         nodes[dev_backend].children.extend([api, auth]);
 
-        let web = push_node(&mut nodes, "web", NodeKind::Project);
-        let design = push_node(&mut nodes, "design-system", NodeKind::Project);
+        let web = push_node(
+            &mut nodes,
+            "web",
+            NodeKind::Project,
+            "https://gitlab.example.com/dev-platform/frontend/web",
+        );
+        let design = push_node(
+            &mut nodes,
+            "design-system",
+            NodeKind::Project,
+            "https://gitlab.example.com/dev-platform/frontend/design-system",
+        );
         nodes[dev_frontend].children.extend([web, design]);
 
-        let data_ingest = push_node(&mut nodes, "ingest", NodeKind::Group);
-        let data_models = push_node(&mut nodes, "models", NodeKind::Group);
-        let data_tools = push_node(&mut nodes, "data-tools", NodeKind::Project);
+        let data_ingest = push_node(
+            &mut nodes,
+            "ingest",
+            NodeKind::Group,
+            "https://gitlab.example.com/data/ingest",
+        );
+        let data_models = push_node(
+            &mut nodes,
+            "models",
+            NodeKind::Group,
+            "https://gitlab.example.com/data/models",
+        );
+        let data_tools = push_node(
+            &mut nodes,
+            "data-tools",
+            NodeKind::Project,
+            "https://gitlab.example.com/data/data-tools",
+        );
         nodes[data].children.extend([data_ingest, data_models, data_tools]);
 
-        let ingest = push_node(&mut nodes, "ingest", NodeKind::Project);
-        let pipeline = push_node(&mut nodes, "pipeline", NodeKind::Project);
+        let ingest = push_node(
+            &mut nodes,
+            "ingest",
+            NodeKind::Project,
+            "https://gitlab.example.com/data/ingest/ingest",
+        );
+        let pipeline = push_node(
+            &mut nodes,
+            "pipeline",
+            NodeKind::Project,
+            "https://gitlab.example.com/data/ingest/pipeline",
+        );
         nodes[data_ingest].children.extend([ingest, pipeline]);
 
-        let fraud = push_node(&mut nodes, "fraud", NodeKind::Project);
-        let churn = push_node(&mut nodes, "churn", NodeKind::Project);
+        let fraud = push_node(
+            &mut nodes,
+            "fraud",
+            NodeKind::Project,
+            "https://gitlab.example.com/data/models/fraud",
+        );
+        let churn = push_node(
+            &mut nodes,
+            "churn",
+            NodeKind::Project,
+            "https://gitlab.example.com/data/models/churn",
+        );
         nodes[data_models].children.extend([fraud, churn]);
 
-        let sec_tools = push_node(&mut nodes, "sec-tools", NodeKind::Project);
-        let audits = push_node(&mut nodes, "audits", NodeKind::Project);
+        let sec_tools = push_node(
+            &mut nodes,
+            "sec-tools",
+            NodeKind::Project,
+            "https://gitlab.example.com/security/sec-tools",
+        );
+        let audits = push_node(
+            &mut nodes,
+            "audits",
+            NodeKind::Project,
+            "https://gitlab.example.com/security/audits",
+        );
         nodes[sec].children.extend([sec_tools, audits]);
 
         nodes[dev_platform].expanded = true;
@@ -391,7 +526,7 @@ impl App {
         let mut nodes = Vec::new();
         let mut id_to_node = HashMap::new();
         for group in &groups {
-            let node_id = push_node(&mut nodes, &group.name, NodeKind::Group);
+            let node_id = push_node(&mut nodes, &group.name, NodeKind::Group, &group.web_url);
             id_to_node.insert(group.id, node_id);
         }
 
@@ -415,7 +550,8 @@ impl App {
                 continue;
             };
             for project in entry.projects {
-                let project_node = push_node(&mut nodes, &project.name, NodeKind::Project);
+                let project_node =
+                    push_node(&mut nodes, &project.name, NodeKind::Project, &project.web_url);
                 nodes[parent_node].children.push(project_node);
             }
         }
@@ -521,6 +657,24 @@ impl App {
         }
     }
 
+    fn yank_selected<C: ClipboardSink>(
+        &mut self,
+        visible: &[VisibleNode],
+        clipboard: &mut C,
+    ) -> Result<String> {
+        if visible.is_empty() {
+            anyhow::bail!("no selection");
+        }
+        let node_id = visible[self.selected].id;
+        let url = self.nodes[node_id].url.clone();
+        clipboard.set_text(url.clone())?;
+        Ok(url)
+    }
+
+    fn set_status(&mut self, message: String) {
+        self.status = Some(message);
+    }
+
     fn set_pending_g(&mut self) {
         self.pending_g = true;
     }
@@ -544,13 +698,14 @@ struct VisibleNode {
     depth: usize,
 }
 
-fn push_node(nodes: &mut Vec<Node>, name: &str, kind: NodeKind) -> usize {
+fn push_node(nodes: &mut Vec<Node>, name: &str, kind: NodeKind, url: &str) -> usize {
     let id = nodes.len();
     nodes.push(Node {
         name: name.to_string(),
         kind,
         children: Vec::new(),
         expanded: false,
+        url: url.to_string(),
     });
     id
 }
@@ -572,8 +727,8 @@ mod tests {
     #[test]
     fn visible_nodes_respects_expansion() {
         let mut nodes = Vec::new();
-        let root = push_node(&mut nodes, "root", NodeKind::Group);
-        let child = push_node(&mut nodes, "child", NodeKind::Project);
+        let root = push_node(&mut nodes, "root", NodeKind::Group, "https://example.com/root");
+        let child = push_node(&mut nodes, "child", NodeKind::Project, "https://example.com/child");
         nodes[root].children.push(child);
 
         let parent = build_parent_map(&nodes);
@@ -626,11 +781,13 @@ mod tests {
             GitLabGroup {
                 id: 1,
                 name: "root".to_string(),
+                web_url: "https://example.com/root".to_string(),
                 parent_id: None,
             },
             GitLabGroup {
                 id: 2,
                 name: "child".to_string(),
+                web_url: "https://example.com/root/child".to_string(),
                 parent_id: Some(1),
             },
         ];
@@ -638,6 +795,7 @@ mod tests {
             group_id: 1,
             projects: vec![GitLabProject {
                 name: "proj".to_string(),
+                web_url: "https://example.com/root/proj".to_string(),
             }],
         }];
 
@@ -669,8 +827,8 @@ mod tests {
     #[test]
     fn vim_navigation_helpers_update_selection() {
         let mut nodes = Vec::new();
-        let root = push_node(&mut nodes, "root", NodeKind::Group);
-        let child = push_node(&mut nodes, "child", NodeKind::Project);
+        let root = push_node(&mut nodes, "root", NodeKind::Group, "https://example.com/root");
+        let child = push_node(&mut nodes, "child", NodeKind::Project, "https://example.com/child");
         nodes[root].children.push(child);
         nodes[root].expanded = true;
 
@@ -714,5 +872,44 @@ mod tests {
         app.set_pending_g();
         assert!(app.consume_pending_g());
         assert!(!app.consume_pending_g());
+    }
+
+    #[test]
+    fn yank_selected_copies_url() {
+        let mut nodes = Vec::new();
+        let root = push_node(&mut nodes, "root", NodeKind::Group, "https://example.com/root");
+        let parent = build_parent_map(&nodes);
+        let mut app = App {
+            nodes,
+            roots: vec![root],
+            parent,
+            selected: 0,
+            config: Config {
+                gitlab_url: "https://gitlab.com".to_string(),
+                gitlab_token: "token".to_string(),
+            },
+            status: None,
+            pending_g: false,
+        };
+
+        let visible = app.visible_nodes();
+        let mut clipboard = MockClipboard { text: None };
+        let url = app
+            .yank_selected(&visible, &mut clipboard)
+            .expect("yank should succeed");
+
+        assert_eq!(url, "https://example.com/root");
+        assert_eq!(clipboard.text.as_deref(), Some("https://example.com/root"));
+    }
+
+    struct MockClipboard {
+        text: Option<String>,
+    }
+
+    impl ClipboardSink for MockClipboard {
+        fn set_text(&mut self, text: String) -> Result<()> {
+            self.text = Some(text);
+            Ok(())
+        }
     }
 }
