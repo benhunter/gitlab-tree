@@ -13,8 +13,9 @@
 - Cache API responses to speed up startup.
 
 ## Near Term
-- TBD.
+- Add clipboard fallback for headless sessions (e.g., `wl-copy`, `xclip`).
 - Expand/contract the tree by pressing Enter.
+- Add a refresh keybind (`r`) to reload the tree from GitLab.
 
 ## Future
-- TBD.
+- TBD
