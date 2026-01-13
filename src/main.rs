@@ -1232,6 +1232,8 @@ impl App {
             roots.push(root);
         }
 
+        apply_sorting(&mut nodes, &mut roots);
+
         for &root in &roots {
             nodes[root].expanded = true;
         }
@@ -1602,6 +1604,14 @@ fn build_parent_map(nodes: &[Node]) -> Vec<Option<usize>> {
     parent
 }
 
+fn apply_sorting(nodes: &mut [Node], roots: &mut Vec<usize>) {
+    let names: Vec<String> = nodes.iter().map(|node| node.name.to_lowercase()).collect();
+    roots.sort_by(|a, b| names[*a].cmp(&names[*b]));
+    for node in nodes.iter_mut() {
+        node.children.sort_by(|a, b| names[*a].cmp(&names[*b]));
+    }
+}
+
 fn filter_visible_nodes(
     visible: &[VisibleNode],
     nodes: &[Node],
@@ -1955,6 +1965,55 @@ mod tests {
         app.handle_key(KeyCode::Enter, &visible, None, &mut browser)
             .expect("handle key");
         assert!(!app.nodes[root].expanded);
+    }
+
+    #[test]
+    fn apply_sorting_orders_children_and_roots() {
+        let mut nodes = Vec::new();
+        let zeta = push_node(
+            &mut nodes,
+            "zeta",
+            NodeKind::Group,
+            "https://example.com/zeta",
+            "zeta",
+            "private",
+            None,
+        );
+        let alpha = push_node(
+            &mut nodes,
+            "alpha",
+            NodeKind::Group,
+            "https://example.com/alpha",
+            "alpha",
+            "private",
+            None,
+        );
+        let beta = push_node(
+            &mut nodes,
+            "beta",
+            NodeKind::Project,
+            "https://example.com/alpha/beta",
+            "alpha/beta",
+            "private",
+            None,
+        );
+        let gamma = push_node(
+            &mut nodes,
+            "gamma",
+            NodeKind::Project,
+            "https://example.com/alpha/gamma",
+            "alpha/gamma",
+            "private",
+            None,
+        );
+
+        nodes[alpha].children.extend([gamma, beta]);
+
+        let mut roots = vec![zeta, alpha];
+        apply_sorting(&mut nodes, &mut roots);
+
+        assert_eq!(roots, vec![alpha, zeta]);
+        assert_eq!(nodes[alpha].children, vec![beta, gamma]);
     }
 
     #[test]

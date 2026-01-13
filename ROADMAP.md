@@ -15,11 +15,11 @@
 - Enforce feature-branch-only commits in contributor workflow.
 - Add clipboard fallback for headless sessions (e.g., `wl-copy`, `xclip`).
 - Expand/contract the tree by pressing Enter.
+- Alphabetize the groups and projects.
 
 ## Near Term
 - Ctrl-C closes the app
 - PgUp/PgDn navigates by page
-- Alphabetize the groups and projects
 
 ## Future
 - Configurable sort options for the group order and project order, such as alph or date of recent activity.

@@ -3,6 +3,7 @@
 Ratatui-based CLI to explore GitLab groups and projects as a tree.
 The right-hand details pane shows metadata like path, visibility, and last activity.
 Use `/` to filter the tree by name with fuzzy matching.
+Groups and projects are sorted alphabetically.
 
 ## Requirements
 
