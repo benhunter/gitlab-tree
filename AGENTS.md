@@ -9,7 +9,7 @@
 5. Write a new test. Verify the test fails.
 6. Implement the feature to make the test pass.
 7. Update all related documentation.
-8. Commit and push. Do not merge to main.
+8. Commit and push on the feature branch only; never commit directly on `main`.
 
 ## Project Structure & Module Organization
 - `src/main.rs`: single-binary Rust CLI entry point and core logic.
