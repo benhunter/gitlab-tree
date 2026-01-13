@@ -5,6 +5,7 @@ The right-hand details pane shows metadata like path, visibility, and last activ
 Use `/` to filter the tree by name with fuzzy matching.
 Groups and projects are sorted alphabetically.
 Press `?` to view keybinds in a help modal.
+Personal projects are filtered so only user-namespace projects appear under your username.
 
 ## Requirements
 

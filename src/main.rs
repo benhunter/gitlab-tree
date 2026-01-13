@@ -570,6 +570,8 @@ struct GitLabProject {
     path_with_namespace: String,
     visibility: String,
     last_activity_at: Option<String>,
+    #[serde(default)]
+    namespace: Option<GitLabNamespace>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -581,6 +583,11 @@ struct GroupProjects {
 #[derive(Debug, Deserialize)]
 struct GitLabUser {
     username: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct GitLabNamespace {
+    kind: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -798,8 +805,9 @@ fn fetch_owned_projects(config: &Config) -> Result<Vec<GitLabProject>> {
             .trim()
             .to_string();
 
-        let mut page_projects: Vec<GitLabProject> = resp.json()?;
-        all.append(&mut page_projects);
+        let page_projects: Vec<GitLabProject> = resp.json()?;
+        let mut personal_projects = filter_personal_projects(page_projects);
+        all.append(&mut personal_projects);
 
         if next_page.is_empty() {
             break;
@@ -823,6 +831,13 @@ fn fetch_personal_projects(config: &Config) -> Result<PersonalProjects> {
         web_url,
         projects,
     })
+}
+
+fn filter_personal_projects(projects: Vec<GitLabProject>) -> Vec<GitLabProject> {
+    projects
+        .into_iter()
+        .filter(|project| project.namespace.as_ref().map(|ns| ns.kind.as_str()) == Some("user"))
+        .collect()
 }
 
 fn fetch_projects_by_group(
@@ -2469,6 +2484,9 @@ mod tests {
                 path_with_namespace: "root/proj".to_string(),
                 visibility: "private".to_string(),
                 last_activity_at: Some("2024-01-01T00:00:00Z".to_string()),
+                namespace: Some(GitLabNamespace {
+                    kind: "group".to_string(),
+                }),
             }],
         }];
 
@@ -2506,6 +2524,9 @@ mod tests {
                 path_with_namespace: "alice/notes".to_string(),
                 visibility: "private".to_string(),
                 last_activity_at: None,
+                namespace: Some(GitLabNamespace {
+                    kind: "user".to_string(),
+                }),
             }],
         };
 
@@ -2727,6 +2748,9 @@ mod tests {
                     path_with_namespace: "root/proj".to_string(),
                     visibility: "private".to_string(),
                     last_activity_at: Some("2024-01-01T00:00:00Z".to_string()),
+                    namespace: Some(GitLabNamespace {
+                        kind: "group".to_string(),
+                    }),
                 }],
             }],
             personal: None,
@@ -2740,6 +2764,36 @@ mod tests {
         assert_eq!(loaded.groups[0].name, "root");
         assert_eq!(loaded.projects_by_group.len(), 1);
         assert_eq!(loaded.projects_by_group[0].projects[0].name, "proj");
+    }
+
+    #[test]
+    fn personal_projects_filter_only_user_namespace() {
+        let projects = vec![
+            GitLabProject {
+                name: "personal".to_string(),
+                web_url: "https://example.com/alice/personal".to_string(),
+                path_with_namespace: "alice/personal".to_string(),
+                visibility: "private".to_string(),
+                last_activity_at: None,
+                namespace: Some(GitLabNamespace {
+                    kind: "user".to_string(),
+                }),
+            },
+            GitLabProject {
+                name: "grouped".to_string(),
+                web_url: "https://example.com/group/grouped".to_string(),
+                path_with_namespace: "group/grouped".to_string(),
+                visibility: "private".to_string(),
+                last_activity_at: None,
+                namespace: Some(GitLabNamespace {
+                    kind: "group".to_string(),
+                }),
+            },
+        ];
+
+        let filtered = filter_personal_projects(projects);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].name, "personal");
     }
 
     struct MockClipboardProbe {
