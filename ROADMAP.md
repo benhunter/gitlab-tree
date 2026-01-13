@@ -18,10 +18,10 @@
 - Alphabetize the groups and projects.
 - Ctrl-C closes the app.
 - PgUp/PgDn navigates by page.
+- Configurable sort options for the group order and project order, such as alph or date of recent activity.
 
 ## Near Term
 - the group with the same name as the user should not include projects that are in another group. The user node should only have personal projects that are not under a group.
 
 ## Future
-- Configurable sort options for the group order and project order, such as alph or date of recent activity.
 - TBD

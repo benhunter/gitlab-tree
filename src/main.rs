@@ -268,6 +268,8 @@ struct Config {
     filters: ApiFilters,
     cache_path: PathBuf,
     cache_ttl: Duration,
+    group_sort: SortOrder,
+    project_sort: SortOrder,
 }
 
 impl Config {
@@ -288,6 +290,10 @@ impl Config {
         let cache_path = read_env_optional(&reader, "GITLAB_CACHE_PATH")
             .map(PathBuf::from)
             .unwrap_or_else(default_cache_path);
+        let group_sort =
+            SortOrder::from_env(&reader, "GITLAB_GROUP_SORT")?.unwrap_or(SortOrder::Alpha);
+        let project_sort =
+            SortOrder::from_env(&reader, "GITLAB_PROJECT_SORT")?.unwrap_or(SortOrder::Alpha);
 
         Ok(Self {
             gitlab_url,
@@ -295,7 +301,31 @@ impl Config {
             filters,
             cache_path,
             cache_ttl: Duration::from_secs(cache_ttl_seconds),
+            group_sort,
+            project_sort,
         })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SortOrder {
+    Alpha,
+    Activity,
+}
+
+impl SortOrder {
+    fn from_env<F>(reader: &F, key: &str) -> Result<Option<Self>>
+    where
+        F: Fn(&str) -> Option<String>,
+    {
+        let Some(value) = read_env_optional(reader, key) else {
+            return Ok(None);
+        };
+        match value.to_lowercase().as_str() {
+            "alpha" | "alphabetical" => Ok(Some(SortOrder::Alpha)),
+            "activity" | "last_activity" | "recent" => Ok(Some(SortOrder::Activity)),
+            _ => anyhow::bail!("invalid sort order for {key}: {value}"),
+        }
     }
 }
 
@@ -1232,7 +1262,7 @@ impl App {
             roots.push(root);
         }
 
-        apply_sorting(&mut nodes, &mut roots);
+        apply_sorting(&mut nodes, &mut roots, &config);
 
         for &root in &roots {
             nodes[root].expanded = true;
@@ -1634,12 +1664,34 @@ fn build_parent_map(nodes: &[Node]) -> Vec<Option<usize>> {
     parent
 }
 
-fn apply_sorting(nodes: &mut [Node], roots: &mut Vec<usize>) {
+fn apply_sorting(nodes: &mut [Node], roots: &mut Vec<usize>, config: &Config) {
     let names: Vec<String> = nodes.iter().map(|node| node.name.to_lowercase()).collect();
-    roots.sort_by(|a, b| names[*a].cmp(&names[*b]));
+    let activities: Vec<Option<String>> = nodes.iter().map(|node| node.last_activity.clone()).collect();
+
+    roots.sort_by(|a, b| compare_nodes(*a, *b, &names, &activities, config.group_sort));
     for node in nodes.iter_mut() {
-        node.children.sort_by(|a, b| names[*a].cmp(&names[*b]));
+        node.children
+            .sort_by(|a, b| compare_nodes(*a, *b, &names, &activities, config.project_sort));
     }
+}
+
+fn compare_nodes(
+    a: usize,
+    b: usize,
+    names: &[String],
+    activities: &[Option<String>],
+    order: SortOrder,
+) -> std::cmp::Ordering {
+    match order {
+        SortOrder::Alpha => names[a].cmp(&names[b]),
+        SortOrder::Activity => activity_key(activities[a].as_deref())
+            .cmp(&activity_key(activities[b].as_deref()))
+            .then_with(|| names[a].cmp(&names[b])),
+    }
+}
+
+fn activity_key(timestamp: Option<&str>) -> std::cmp::Reverse<(bool, &str)> {
+    std::cmp::Reverse((timestamp.is_none(), timestamp.unwrap_or("")))
 }
 
 fn filter_visible_nodes(
@@ -1689,6 +1741,8 @@ mod tests {
             filters: ApiFilters::default(),
             cache_path: default_cache_path(),
             cache_ttl: Duration::from_secs(300),
+            group_sort: SortOrder::Alpha,
+            project_sort: SortOrder::Alpha,
         }
     }
 
@@ -1765,6 +1819,8 @@ mod tests {
         assert!(config
             .cache_path
             .ends_with(PathBuf::from("gitlab-tree").join("cache.json")));
+        assert_eq!(config.group_sort, SortOrder::Alpha);
+        assert_eq!(config.project_sort, SortOrder::Alpha);
     }
 
     #[test]
@@ -1786,6 +1842,8 @@ mod tests {
             "GITLAB_PER_PAGE" => Some("50".to_string()),
             "GITLAB_CACHE_TTL_SECONDS" => Some("120".to_string()),
             "GITLAB_CACHE_PATH" => Some("/tmp/gitlab-tree-cache.json".to_string()),
+            "GITLAB_GROUP_SORT" => Some("activity".to_string()),
+            "GITLAB_PROJECT_SORT" => Some("alpha".to_string()),
             _ => None,
         };
 
@@ -1801,6 +1859,8 @@ mod tests {
             config.cache_path,
             PathBuf::from("/tmp/gitlab-tree-cache.json")
         );
+        assert_eq!(config.group_sort, SortOrder::Activity);
+        assert_eq!(config.project_sort, SortOrder::Alpha);
     }
 
     #[test]
@@ -1808,6 +1868,18 @@ mod tests {
         let reader = |key: &str| match key {
             "GITLAB_TOKEN" => Some("token".to_string()),
             "GITLAB_OWNED" => Some("maybe".to_string()),
+            _ => None,
+        };
+
+        let result = Config::from_env_reader(reader);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_from_env_reader_rejects_invalid_sort() {
+        let reader = |key: &str| match key {
+            "GITLAB_TOKEN" => Some("token".to_string()),
+            "GITLAB_GROUP_SORT" => Some("random".to_string()),
             _ => None,
         };
 
@@ -2150,10 +2222,40 @@ mod tests {
         nodes[alpha].children.extend([gamma, beta]);
 
         let mut roots = vec![zeta, alpha];
-        apply_sorting(&mut nodes, &mut roots);
+        let config = test_config();
+        apply_sorting(&mut nodes, &mut roots, &config);
 
         assert_eq!(roots, vec![alpha, zeta]);
         assert_eq!(nodes[alpha].children, vec![beta, gamma]);
+    }
+
+    #[test]
+    fn apply_sorting_orders_by_activity() {
+        let mut nodes = Vec::new();
+        let recent = push_node(
+            &mut nodes,
+            "recent",
+            NodeKind::Project,
+            "https://example.com/recent",
+            "recent",
+            "private",
+            Some("2024-10-02T10:00:00Z".to_string()),
+        );
+        let older = push_node(
+            &mut nodes,
+            "older",
+            NodeKind::Project,
+            "https://example.com/older",
+            "older",
+            "private",
+            Some("2024-01-01T10:00:00Z".to_string()),
+        );
+        let mut roots = vec![older, recent];
+        let mut config = test_config();
+        config.group_sort = SortOrder::Activity;
+
+        apply_sorting(&mut nodes, &mut roots, &config);
+        assert_eq!(roots, vec![recent, older]);
     }
 
     #[test]

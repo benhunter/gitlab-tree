@@ -24,6 +24,8 @@ Set the following environment variables:
 - `GITLAB_PER_PAGE` (optional): page size for API calls (default `100`).
 - `GITLAB_CACHE_TTL_SECONDS` (optional): cache TTL in seconds (default `300`).
 - `GITLAB_CACHE_PATH` (optional): override cache file location.
+- `GITLAB_GROUP_SORT` (optional): `alpha` or `activity` (default `alpha`).
+- `GITLAB_PROJECT_SORT` (optional): `alpha` or `activity` (default `alpha`).
 
 ## Run
 
