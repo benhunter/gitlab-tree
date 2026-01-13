@@ -7,6 +7,8 @@ Groups and projects are sorted alphabetically.
 Press `?` to view keybinds in a help modal.
 Personal projects are filtered so only user-namespace projects appear under your username.
 
+![gitlab-tree screenshot](./assets/gitlab-tree.png)
+
 ## Requirements
 
 - Rust toolchain (stable)
