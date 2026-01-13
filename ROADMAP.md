@@ -11,11 +11,13 @@
 - Show project metadata (path, visibility, last activity) in the UI.
 - Add search and fuzzy filtering across groups/projects.
 - Cache API responses to speed up startup.
+- Add a refresh keybind (`r`) to reload the tree from GitLab.
 
 ## Near Term
 - Add clipboard fallback for headless sessions (e.g., `wl-copy`, `xclip`).
 - Expand/contract the tree by pressing Enter.
-- Add a refresh keybind (`r`) to reload the tree from GitLab.
+- Alphabetize the groups and projects
 
 ## Future
+- Configurable sort options for the group order and project order, such as alph or date of recent activity.
 - TBD

@@ -48,3 +48,4 @@ GITLAB_URL=https://gitlab.example.com GITLAB_TOKEN=... cargo run
 - `/`: enter search mode
 - `enter`: apply search
 - `esc`: clear search
+- `r`: refresh the tree from GitLab

@@ -73,67 +73,20 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, config: Config
             }
         }
 
-        if let Some(app) = app.as_mut() {
-            let visible = app.visible_nodes();
-            app.ensure_selection(visible.len());
-            app.tick_toast();
+        let mut pending_action = None;
+        if let Some(app_ref) = app.as_mut() {
+            let visible = app_ref.visible_nodes();
+            app_ref.ensure_selection(visible.len());
+            app_ref.tick_toast();
 
-            terminal.draw(|frame| ui(frame, app, &visible))?;
+            terminal.draw(|frame| ui(frame, app_ref, &visible))?;
 
             if event::poll(Duration::from_millis(200))? {
                 if let Event::Key(key) = event::read()? {
-                    if app.search_mode {
-                        match key.code {
-                            KeyCode::Esc => app.clear_search(),
-                            KeyCode::Enter => app.exit_search_mode(),
-                            KeyCode::Backspace => app.pop_search_char(),
-                            KeyCode::Char(ch) => app.push_search_char(ch),
-                            _ => {}
-                        }
-                    } else {
-                        match key.code {
-                            KeyCode::Char('q') => return Ok(()),
-                            KeyCode::Up => app.move_up(),
-                            KeyCode::Down => app.move_down(visible.len()),
-                            KeyCode::Left => app.collapse_or_parent(&visible),
-                            KeyCode::Right => app.expand_or_child(&visible),
-                            KeyCode::Char('k') => app.move_up(),
-                            KeyCode::Char('j') => app.move_down(visible.len()),
-                            KeyCode::Char('h') => app.collapse_or_parent(&visible),
-                            KeyCode::Char('l') => app.expand_or_child(&visible),
-                            KeyCode::Char('g') => {
-                                if app.consume_pending_g() {
-                                    app.move_top();
-                                } else {
-                                    app.set_pending_g();
-                                }
-                            }
-                            KeyCode::Char('G') => app.move_bottom(visible.len()),
-                            KeyCode::Char('y') => {
-                                if let Some(clipboard) = clipboard.as_mut() {
-                                    match app.yank_selected(&visible, clipboard) {
-                                        Ok(url) => {
-                                            app.set_status(format!("copied {url}"));
-                                            app.set_toast("Copied URL".to_string());
-                                        }
-                                        Err(err) => app.set_status(format!("copy failed: {err}")),
-                                    }
-                                } else {
-                                    app.set_status("clipboard unavailable".to_string());
-                                }
-                            }
-                            KeyCode::Char('o') => match app.open_selected(&visible, &mut browser) {
-                                Ok(url) => app.set_status(format!("opened {url}")),
-                                Err(err) => app.set_status(format!("open failed: {err}")),
-                            },
-                            KeyCode::Char('/') => app.start_search(),
-                            KeyCode::Esc => app.clear_search(),
-                            _ => {}
-                        }
-                    }
-                    if key.code != KeyCode::Char('g') {
-                        app.clear_pending_g();
-                    }
+                    let clipboard_ref =
+                        clipboard.as_mut().map(|cb| cb as &mut dyn ClipboardSink);
+                    let action = app_ref.handle_key(key.code, &visible, clipboard_ref, &mut browser)?;
+                    pending_action = Some(action);
                 }
             }
         } else if let Some(handle) = loader.as_mut() {
@@ -149,6 +102,17 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, config: Config
             }
         } else {
             return Ok(());
+        }
+
+        if let Some(action) = pending_action {
+            match action {
+                KeyAction::Quit => return Ok(()),
+                KeyAction::Reload => {
+                    loader = Some(start_loader(config.clone()));
+                    app = None;
+                }
+                KeyAction::None => {}
+            }
         }
     }
 }
@@ -214,7 +178,7 @@ fn ui(
         "token: set"
     };
     let mut footer = format!(
-        "q quit | up/down move | right expand | left collapse | y yank | o open | / search | {} | {}",
+        "q quit | r refresh | up/down move | right expand | left collapse | y yank | o open | / search | {} | {}",
         app.config.gitlab_url, token_state
     );
     if let Some(status) = &app.status {
@@ -765,6 +729,13 @@ struct Toast {
     remaining: u8,
 }
 
+#[derive(Clone, Copy)]
+enum KeyAction {
+    None,
+    Quit,
+    Reload,
+}
+
 struct App {
     nodes: Vec<Node>,
     roots: Vec<usize>,
@@ -1229,7 +1200,7 @@ impl App {
         }
     }
 
-    fn yank_selected<C: ClipboardSink>(
+    fn yank_selected<C: ClipboardSink + ?Sized>(
         &mut self,
         visible: &[VisibleNode],
         clipboard: &mut C,
@@ -1243,7 +1214,7 @@ impl App {
         Ok(url)
     }
 
-    fn open_selected<B: BrowserOpener>(
+    fn open_selected<B: BrowserOpener + ?Sized>(
         &mut self,
         visible: &[VisibleNode],
         browser: &mut B,
@@ -1331,6 +1302,110 @@ impl App {
             }
         }
     }
+
+    fn handle_key(
+        &mut self,
+        key: KeyCode,
+        visible: &[VisibleNode],
+        clipboard: Option<&mut dyn ClipboardSink>,
+        browser: &mut dyn BrowserOpener,
+    ) -> Result<KeyAction> {
+        if self.search_mode {
+            match key {
+                KeyCode::Esc => self.clear_search(),
+                KeyCode::Enter => self.exit_search_mode(),
+                KeyCode::Backspace => self.pop_search_char(),
+                KeyCode::Char(ch) => self.push_search_char(ch),
+                _ => {}
+            }
+            return Ok(KeyAction::None);
+        }
+
+        let action = match key {
+            KeyCode::Char('q') => KeyAction::Quit,
+            KeyCode::Char('r') => KeyAction::Reload,
+            KeyCode::Up => {
+                self.move_up();
+                KeyAction::None
+            }
+            KeyCode::Down => {
+                self.move_down(visible.len());
+                KeyAction::None
+            }
+            KeyCode::Left => {
+                self.collapse_or_parent(visible);
+                KeyAction::None
+            }
+            KeyCode::Right => {
+                self.expand_or_child(visible);
+                KeyAction::None
+            }
+            KeyCode::Char('k') => {
+                self.move_up();
+                KeyAction::None
+            }
+            KeyCode::Char('j') => {
+                self.move_down(visible.len());
+                KeyAction::None
+            }
+            KeyCode::Char('h') => {
+                self.collapse_or_parent(visible);
+                KeyAction::None
+            }
+            KeyCode::Char('l') => {
+                self.expand_or_child(visible);
+                KeyAction::None
+            }
+            KeyCode::Char('g') => {
+                if self.consume_pending_g() {
+                    self.move_top();
+                } else {
+                    self.set_pending_g();
+                }
+                KeyAction::None
+            }
+            KeyCode::Char('G') => {
+                self.move_bottom(visible.len());
+                KeyAction::None
+            }
+            KeyCode::Char('y') => {
+                if let Some(clipboard) = clipboard {
+                    match self.yank_selected(visible, clipboard) {
+                        Ok(url) => {
+                            self.set_status(format!("copied {url}"));
+                            self.set_toast("Copied URL".to_string());
+                        }
+                        Err(err) => self.set_status(format!("copy failed: {err}")),
+                    }
+                } else {
+                    self.set_status("clipboard unavailable".to_string());
+                }
+                KeyAction::None
+            }
+            KeyCode::Char('o') => {
+                match self.open_selected(visible, browser) {
+                    Ok(url) => self.set_status(format!("opened {url}")),
+                    Err(err) => self.set_status(format!("open failed: {err}")),
+                }
+                KeyAction::None
+            }
+            KeyCode::Char('/') => {
+                self.start_search();
+                KeyAction::None
+            }
+            KeyCode::Esc => {
+                self.clear_search();
+                KeyAction::None
+            }
+            _ => KeyAction::None,
+        };
+
+        if key != KeyCode::Char('g') {
+            self.clear_pending_g();
+        }
+
+        Ok(action)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1409,6 +1484,7 @@ fn fuzzy_match(needle: &str, haystack: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crossterm::event::KeyCode;
     use std::time::{Duration, UNIX_EPOCH};
 
     fn test_config() -> Config {
@@ -1636,6 +1712,45 @@ mod tests {
         let filtered = filter_visible_nodes(&visible, &nodes, "glb");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, 0);
+    }
+
+    #[test]
+    fn handle_key_returns_reload_on_r() {
+        let mut nodes = Vec::new();
+        let root = push_node(
+            &mut nodes,
+            "root",
+            NodeKind::Group,
+            "https://example.com/root",
+            "root",
+            "private",
+            None,
+        );
+        let parent = build_parent_map(&nodes);
+        let mut app = App {
+            nodes,
+            roots: vec![root],
+            parent,
+            selected: 0,
+            config: test_config(),
+            status: None,
+            pending_g: false,
+            toast: None,
+            search_query: None,
+            search_mode: false,
+        };
+
+        let visible = app.visible_nodes();
+        let mut browser = MockBrowser { opened: None };
+        let action = app
+            .handle_key(KeyCode::Char('r'), &visible, None, &mut browser)
+            .expect("handle key");
+
+        matches!(action, KeyAction::Reload);
+        if let KeyAction::Reload = action {
+        } else {
+            panic!("expected reload action");
+        }
     }
 
     #[test]
