@@ -185,10 +185,7 @@ fn ui(
     } else {
         "token: set"
     };
-    let mut footer = format!(
-        "q/ctrl-c quit | r refresh | enter toggle | pgup/pgdn page | up/down move | right expand | left collapse | y yank | o open | / search | {} | {}",
-        app.config.gitlab_url, token_state
-    );
+    let mut footer = format!("? help | {} | {}", app.config.gitlab_url, token_state);
     if let Some(status) = &app.status {
         footer.push_str(&format!(" | {status}"));
     }
@@ -201,6 +198,9 @@ fn ui(
 
     if let Some(toast) = &app.toast {
         render_toast(frame, toast);
+    }
+    if app.show_help {
+        render_help(frame);
     }
 }
 
@@ -238,6 +238,32 @@ fn render_toast(frame: &mut ratatui::Frame, toast: &Toast) {
     let rect = Rect::new(x, y, width.min(area.width), height.min(area.height));
     let block = Block::default().title("Notice").borders(Borders::ALL);
     let paragraph = Paragraph::new(toast.message.clone()).block(block);
+    frame.render_widget(paragraph, rect);
+}
+
+fn render_help(frame: &mut ratatui::Frame) {
+    let area = frame.size();
+    let width = (area.width.saturating_mul(3)).saturating_div(4).max(40);
+    let height = 14u16.min(area.height);
+    let x = area.width.saturating_sub(width) / 2;
+    let y = area.height.saturating_sub(height) / 2;
+    let rect = Rect::new(x, y, width, height);
+    let lines = [
+        "q / ctrl-c: quit",
+        "r: refresh",
+        "?: toggle help",
+        "enter: toggle expand/collapse",
+        "up/down or j/k: move selection",
+        "left/right or h/l: collapse/expand",
+        "pgup/pgdn: page navigation",
+        "gg/G: jump to top/bottom",
+        "y: copy URL",
+        "o: open in browser",
+        "/: search",
+        "esc: clear search",
+    ];
+    let paragraph = Paragraph::new(lines.join("\n"))
+        .block(Block::default().title("Help").borders(Borders::ALL));
     frame.render_widget(paragraph, rect);
 }
 
@@ -917,6 +943,7 @@ struct App {
     toast: Option<Toast>,
     search_query: Option<String>,
     search_mode: bool,
+    show_help: bool,
 }
 
 impl App {
@@ -1128,6 +1155,7 @@ impl App {
             toast: None,
             search_query: None,
             search_mode: false,
+            show_help: false,
         }
     }
 
@@ -1281,6 +1309,7 @@ impl App {
             toast: None,
             search_query: None,
             search_mode: false,
+            show_help: false,
         }
     }
 
@@ -1486,6 +1515,10 @@ impl App {
         self.nodes[node_id].expanded = !self.nodes[node_id].expanded;
     }
 
+    fn toggle_help(&mut self) {
+        self.show_help = !self.show_help;
+    }
+
     fn page_up(&mut self, visible_len: usize, page_size: usize) {
         if visible_len == 0 {
             self.selected = 0;
@@ -1528,6 +1561,10 @@ impl App {
             }
             (KeyCode::Char('q'), _) => KeyAction::Quit,
             (KeyCode::Char('r'), _) => KeyAction::Reload,
+            (KeyCode::Char('?'), _) => {
+                self.toggle_help();
+                KeyAction::None
+            }
             (KeyCode::Enter, _) => {
                 self.toggle_selected(visible);
                 KeyAction::None
@@ -1790,6 +1827,7 @@ mod tests {
             toast: None,
             search_query: None,
             search_mode: false,
+            show_help: false,
         };
 
         let visible = app.visible_nodes();
@@ -2014,6 +2052,7 @@ mod tests {
             toast: None,
             search_query: None,
             search_mode: false,
+            show_help: false,
         };
 
         let visible = app.visible_nodes();
@@ -2053,6 +2092,7 @@ mod tests {
             toast: None,
             search_query: None,
             search_mode: false,
+            show_help: false,
         };
 
         let visible = app.visible_nodes();
@@ -2070,6 +2110,54 @@ mod tests {
         } else {
             panic!("expected quit action");
         }
+    }
+
+    #[test]
+    fn handle_key_question_toggles_help() {
+        let mut nodes = Vec::new();
+        let root = push_node(
+            &mut nodes,
+            "root",
+            NodeKind::Group,
+            "https://example.com/root",
+            "root",
+            "private",
+            None,
+        );
+        let parent = build_parent_map(&nodes);
+        let mut app = App {
+            nodes,
+            roots: vec![root],
+            parent,
+            selected: 0,
+            config: test_config(),
+            status: None,
+            pending_g: false,
+            toast: None,
+            search_query: None,
+            search_mode: false,
+            show_help: false,
+        };
+
+        let visible = app.visible_nodes();
+        let mut browser = MockBrowser { opened: None };
+        app.handle_key(
+            key_event(KeyCode::Char('?'), KeyModifiers::NONE),
+            &visible,
+            None,
+            &mut browser,
+        )
+        .expect("handle key");
+        assert!(app.show_help);
+
+        app.handle_key(
+            key_event(KeyCode::Char('?'), KeyModifiers::NONE),
+            &visible,
+            None,
+            &mut browser,
+        )
+        .expect("handle key");
+        assert!(!app.show_help);
     }
 
     #[test]
@@ -2110,6 +2198,7 @@ mod tests {
             toast: None,
             search_query: None,
             search_mode: false,
+            show_help: false,
         };
 
         let visible = app.visible_nodes();
@@ -2155,6 +2244,7 @@ mod tests {
             toast: None,
             search_query: None,
             search_mode: false,
+            show_help: false,
         };
 
         let visible = app.visible_nodes();
@@ -2472,6 +2562,7 @@ mod tests {
             toast: None,
             search_query: None,
             search_mode: false,
+            show_help: false,
         };
 
         app.move_top();
@@ -2494,6 +2585,7 @@ mod tests {
             toast: None,
             search_query: None,
             search_mode: false,
+            show_help: false,
         };
 
         assert!(!app.consume_pending_g());
@@ -2526,6 +2618,7 @@ mod tests {
             toast: None,
             search_query: None,
             search_mode: false,
+            show_help: false,
         };
 
         let visible = app.visible_nodes();
@@ -2562,6 +2655,7 @@ mod tests {
             toast: None,
             search_query: None,
             search_mode: false,
+            show_help: false,
         };
 
         let visible = app.visible_nodes();
@@ -2587,6 +2681,7 @@ mod tests {
             toast: None,
             search_query: None,
             search_mode: false,
+            show_help: false,
         };
 
         app.set_toast("Copied URL".to_string());
