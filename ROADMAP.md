@@ -17,9 +17,9 @@
 - Expand/contract the tree by pressing Enter.
 - Alphabetize the groups and projects.
 - Ctrl-C closes the app.
+- PgUp/PgDn navigates by page.
 
 ## Near Term
-- PgUp/PgDn navigates by page
 
 ## Future
 - Configurable sort options for the group order and project order, such as alph or date of recent activity.

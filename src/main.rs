@@ -186,7 +186,7 @@ fn ui(
         "token: set"
     };
     let mut footer = format!(
-        "q/ctrl-c quit | r refresh | enter toggle | up/down move | right expand | left collapse | y yank | o open | / search | {} | {}",
+        "q/ctrl-c quit | r refresh | enter toggle | pgup/pgdn page | up/down move | right expand | left collapse | y yank | o open | / search | {} | {}",
         app.config.gitlab_url, token_state
     );
     if let Some(status) = &app.status {
@@ -1456,6 +1456,24 @@ impl App {
         self.nodes[node_id].expanded = !self.nodes[node_id].expanded;
     }
 
+    fn page_up(&mut self, visible_len: usize, page_size: usize) {
+        if visible_len == 0 {
+            self.selected = 0;
+            return;
+        }
+        let step = page_size.min(visible_len.saturating_sub(1)).max(1);
+        self.selected = self.selected.saturating_sub(step);
+    }
+
+    fn page_down(&mut self, visible_len: usize, page_size: usize) {
+        if visible_len == 0 {
+            self.selected = 0;
+            return;
+        }
+        let step = page_size.min(visible_len.saturating_sub(1)).max(1);
+        self.selected = (self.selected + step).min(visible_len - 1);
+    }
+
     fn handle_key(
         &mut self,
         key: KeyEvent,
@@ -1482,6 +1500,14 @@ impl App {
             (KeyCode::Char('r'), _) => KeyAction::Reload,
             (KeyCode::Enter, _) => {
                 self.toggle_selected(visible);
+                KeyAction::None
+            }
+            (KeyCode::PageUp, _) => {
+                self.page_up(visible.len(), 10);
+                KeyAction::None
+            }
+            (KeyCode::PageDown, _) => {
+                self.page_down(visible.len(), 10);
                 KeyAction::None
             }
             (KeyCode::Up, _) => {
@@ -1972,6 +1998,54 @@ mod tests {
         } else {
             panic!("expected quit action");
         }
+    }
+
+    #[test]
+    fn page_navigation_moves_selection_by_page() {
+        let mut nodes = Vec::new();
+        let root = push_node(
+            &mut nodes,
+            "root",
+            NodeKind::Group,
+            "https://example.com/root",
+            "root",
+            "private",
+            None,
+        );
+        for idx in 0..20 {
+            let child = push_node(
+                &mut nodes,
+                &format!("child-{idx}"),
+                NodeKind::Project,
+                "https://example.com/root/child",
+                "root/child",
+                "private",
+                None,
+            );
+            nodes[root].children.push(child);
+        }
+        nodes[root].expanded = true;
+
+        let parent = build_parent_map(&nodes);
+        let mut app = App {
+            nodes,
+            roots: vec![root],
+            parent,
+            selected: 0,
+            config: test_config(),
+            status: None,
+            pending_g: false,
+            toast: None,
+            search_query: None,
+            search_mode: false,
+        };
+
+        let visible = app.visible_nodes();
+        app.page_down(visible.len(), 10);
+        assert_eq!(app.selected, 10);
+
+        app.page_up(visible.len(), 10);
+        assert_eq!(app.selected, 0);
     }
 
     #[test]
