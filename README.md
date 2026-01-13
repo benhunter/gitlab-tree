@@ -39,7 +39,7 @@ GITLAB_URL=https://gitlab.example.com GITLAB_TOKEN=... cargo run
 
 ## Controls
 
-- `q`: quit
+- `q` or `ctrl-c`: quit
 - `up/down` or `k/j`: move selection
 - `right/left` or `l/h`: expand/collapse
 - `gg`: jump to top

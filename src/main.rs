@@ -14,7 +14,7 @@ use anyhow::Result;
 use arboard::Clipboard as SystemClipboardHandle;
 use base64::Engine;
 use crossterm::{
-    event::{self, Event, KeyCode},
+    event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -88,11 +88,11 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, config: Config
                 if let Event::Key(key) = event::read()? {
                     let action = if let Some(mut cb) = clipboard.take() {
                         let action =
-                            app_ref.handle_key(key.code, &visible, Some(&mut *cb), &mut browser)?;
+                            app_ref.handle_key(key, &visible, Some(&mut *cb), &mut browser)?;
                         clipboard = Some(cb);
                         action
                     } else {
-                        app_ref.handle_key(key.code, &visible, None, &mut browser)?
+                        app_ref.handle_key(key, &visible, None, &mut browser)?
                     };
                     pending_action = Some(action);
                 }
@@ -186,7 +186,7 @@ fn ui(
         "token: set"
     };
     let mut footer = format!(
-        "q quit | r refresh | enter toggle | up/down move | right expand | left collapse | y yank | o open | / search | {} | {}",
+        "q/ctrl-c quit | r refresh | enter toggle | up/down move | right expand | left collapse | y yank | o open | / search | {} | {}",
         app.config.gitlab_url, token_state
     );
     if let Some(status) = &app.status {
@@ -1458,13 +1458,13 @@ impl App {
 
     fn handle_key(
         &mut self,
-        key: KeyCode,
+        key: KeyEvent,
         visible: &[VisibleNode],
         clipboard: Option<&mut dyn ClipboardSink>,
         browser: &mut dyn BrowserOpener,
     ) -> Result<KeyAction> {
         if self.search_mode {
-            match key {
+            match key.code {
                 KeyCode::Esc => self.clear_search(),
                 KeyCode::Enter => self.exit_search_mode(),
                 KeyCode::Backspace => self.pop_search_char(),
@@ -1474,46 +1474,49 @@ impl App {
             return Ok(KeyAction::None);
         }
 
-        let action = match key {
-            KeyCode::Char('q') => KeyAction::Quit,
-            KeyCode::Char('r') => KeyAction::Reload,
-            KeyCode::Enter => {
+        let action = match (key.code, key.modifiers) {
+            (KeyCode::Char('c'), modifiers) if modifiers.contains(KeyModifiers::CONTROL) => {
+                KeyAction::Quit
+            }
+            (KeyCode::Char('q'), _) => KeyAction::Quit,
+            (KeyCode::Char('r'), _) => KeyAction::Reload,
+            (KeyCode::Enter, _) => {
                 self.toggle_selected(visible);
                 KeyAction::None
             }
-            KeyCode::Up => {
+            (KeyCode::Up, _) => {
                 self.move_up();
                 KeyAction::None
             }
-            KeyCode::Down => {
+            (KeyCode::Down, _) => {
                 self.move_down(visible.len());
                 KeyAction::None
             }
-            KeyCode::Left => {
+            (KeyCode::Left, _) => {
                 self.collapse_or_parent(visible);
                 KeyAction::None
             }
-            KeyCode::Right => {
+            (KeyCode::Right, _) => {
                 self.expand_or_child(visible);
                 KeyAction::None
             }
-            KeyCode::Char('k') => {
+            (KeyCode::Char('k'), _) => {
                 self.move_up();
                 KeyAction::None
             }
-            KeyCode::Char('j') => {
+            (KeyCode::Char('j'), _) => {
                 self.move_down(visible.len());
                 KeyAction::None
             }
-            KeyCode::Char('h') => {
+            (KeyCode::Char('h'), _) => {
                 self.collapse_or_parent(visible);
                 KeyAction::None
             }
-            KeyCode::Char('l') => {
+            (KeyCode::Char('l'), _) => {
                 self.expand_or_child(visible);
                 KeyAction::None
             }
-            KeyCode::Char('g') => {
+            (KeyCode::Char('g'), _) => {
                 if self.consume_pending_g() {
                     self.move_top();
                 } else {
@@ -1521,11 +1524,11 @@ impl App {
                 }
                 KeyAction::None
             }
-            KeyCode::Char('G') => {
+            (KeyCode::Char('G'), _) => {
                 self.move_bottom(visible.len());
                 KeyAction::None
             }
-            KeyCode::Char('y') => {
+            (KeyCode::Char('y'), _) => {
                 if let Some(clipboard) = clipboard {
                     match self.yank_selected(visible, clipboard) {
                         Ok(url) => {
@@ -1539,30 +1542,31 @@ impl App {
                 }
                 KeyAction::None
             }
-            KeyCode::Char('o') => {
+            (KeyCode::Char('o'), _) => {
                 match self.open_selected(visible, browser) {
                     Ok(url) => self.set_status(format!("opened {url}")),
                     Err(err) => self.set_status(format!("open failed: {err}")),
                 }
                 KeyAction::None
             }
-            KeyCode::Char('/') => {
+            (KeyCode::Char('/'), _) => {
                 self.start_search();
                 KeyAction::None
             }
-            KeyCode::Esc => {
+            (KeyCode::Esc, _) => {
                 self.clear_search();
                 KeyAction::None
             }
             _ => KeyAction::None,
         };
 
-        if key != KeyCode::Char('g') {
+        if key.code != KeyCode::Char('g') {
             self.clear_pending_g();
         }
 
         Ok(action)
     }
+
 }
 
 #[derive(Clone, Copy)]
@@ -1649,7 +1653,7 @@ fn fuzzy_match(needle: &str, haystack: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::KeyCode;
+    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyEventState, KeyModifiers};
     use std::time::{Duration, UNIX_EPOCH};
 
     fn test_config() -> Config {
@@ -1659,6 +1663,15 @@ mod tests {
             filters: ApiFilters::default(),
             cache_path: default_cache_path(),
             cache_ttl: Duration::from_secs(300),
+        }
+    }
+
+    fn key_event(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent {
+            code,
+            modifiers,
+            kind: KeyEventKind::Press,
+            state: KeyEventState::NONE,
         }
     }
 
@@ -1908,13 +1921,56 @@ mod tests {
         let visible = app.visible_nodes();
         let mut browser = MockBrowser { opened: None };
         let action = app
-            .handle_key(KeyCode::Char('r'), &visible, None, &mut browser)
+            .handle_key(key_event(KeyCode::Char('r'), KeyModifiers::NONE), &visible, None, &mut browser)
             .expect("handle key");
 
         matches!(action, KeyAction::Reload);
         if let KeyAction::Reload = action {
         } else {
             panic!("expected reload action");
+        }
+    }
+
+    #[test]
+    fn handle_key_ctrl_c_quits() {
+        let mut nodes = Vec::new();
+        let root = push_node(
+            &mut nodes,
+            "root",
+            NodeKind::Group,
+            "https://example.com/root",
+            "root",
+            "private",
+            None,
+        );
+        let parent = build_parent_map(&nodes);
+        let mut app = App {
+            nodes,
+            roots: vec![root],
+            parent,
+            selected: 0,
+            config: test_config(),
+            status: None,
+            pending_g: false,
+            toast: None,
+            search_query: None,
+            search_mode: false,
+        };
+
+        let visible = app.visible_nodes();
+        let mut browser = MockBrowser { opened: None };
+        let action = app
+            .handle_key(
+                key_event(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                &visible,
+                None,
+                &mut browser,
+            )
+            .expect("handle key");
+
+        if let KeyAction::Quit = action {
+        } else {
+            panic!("expected quit action");
         }
     }
 
@@ -1958,11 +2014,21 @@ mod tests {
         let visible = app.visible_nodes();
         let mut browser = MockBrowser { opened: None };
 
-        app.handle_key(KeyCode::Enter, &visible, None, &mut browser)
+        app.handle_key(
+            key_event(KeyCode::Enter, KeyModifiers::NONE),
+            &visible,
+            None,
+            &mut browser,
+        )
             .expect("handle key");
         assert!(app.nodes[root].expanded);
 
-        app.handle_key(KeyCode::Enter, &visible, None, &mut browser)
+        app.handle_key(
+            key_event(KeyCode::Enter, KeyModifiers::NONE),
+            &visible,
+            None,
+            &mut browser,
+        )
             .expect("handle key");
         assert!(!app.nodes[root].expanded);
     }

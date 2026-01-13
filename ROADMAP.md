@@ -16,9 +16,9 @@
 - Add clipboard fallback for headless sessions (e.g., `wl-copy`, `xclip`).
 - Expand/contract the tree by pressing Enter.
 - Alphabetize the groups and projects.
+- Ctrl-C closes the app.
 
 ## Near Term
-- Ctrl-C closes the app
 - PgUp/PgDn navigates by page
 
 ## Future
