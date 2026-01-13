@@ -12,6 +12,7 @@ use std::thread;
 
 use anyhow::Result;
 use arboard::Clipboard as SystemClipboardHandle;
+use base64::Engine;
 use crossterm::{
     event::{self, Event, KeyCode},
     execute,
@@ -334,6 +335,7 @@ enum ClipboardBackend {
     Arboard,
     WlCopy,
     Xclip,
+    Osc52,
     None,
 }
 
@@ -341,6 +343,7 @@ trait ClipboardProbe {
     fn arboard_ok(&self) -> bool;
     fn has_wayland(&self) -> bool;
     fn has_display(&self) -> bool;
+    fn has_tmux(&self) -> bool;
     fn command_exists(&self, command: &str) -> bool;
 }
 
@@ -401,6 +404,20 @@ impl ClipboardSink for SystemClipboard {
     }
 }
 
+struct Osc52Clipboard {
+    tmux: bool,
+}
+
+impl ClipboardSink for Osc52Clipboard {
+    fn set_text(&mut self, text: String) -> Result<()> {
+        let sequence = osc52_sequence(&text, self.tmux);
+        let mut stdout = io::stdout();
+        stdout.write_all(sequence.as_bytes())?;
+        stdout.flush()?;
+        Ok(())
+    }
+}
+
 struct SystemClipboardProbe;
 
 impl ClipboardProbe for SystemClipboardProbe {
@@ -414,6 +431,10 @@ impl ClipboardProbe for SystemClipboardProbe {
 
     fn has_display(&self) -> bool {
         env::var_os("DISPLAY").is_some()
+    }
+
+    fn has_tmux(&self) -> bool {
+        env::var_os("TMUX").is_some()
     }
 
     fn command_exists(&self, command: &str) -> bool {
@@ -433,6 +454,8 @@ fn select_clipboard_backend(probe: &dyn ClipboardProbe) -> ClipboardBackend {
         ClipboardBackend::WlCopy
     } else if probe.has_display() && probe.command_exists("xclip") {
         ClipboardBackend::Xclip
+    } else if probe.has_tmux() {
+        ClipboardBackend::Osc52
     } else {
         ClipboardBackend::None
     }
@@ -449,7 +472,18 @@ fn build_clipboard() -> Option<Box<dyn ClipboardSink>> {
             "xclip",
             &["-selection", "clipboard"],
         ))),
+        ClipboardBackend::Osc52 => Some(Box::new(Osc52Clipboard { tmux: true })),
         ClipboardBackend::None => None,
+    }
+}
+
+fn osc52_sequence(text: &str, tmux: bool) -> String {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+    let osc = format!("\x1b]52;c;{}\x07", encoded);
+    if tmux {
+        format!("\x1bPtmux;\x1b{}\x1b\\", osc)
+    } else {
+        osc
     }
 }
 
@@ -1865,6 +1899,7 @@ mod tests {
             arboard_ok: true,
             has_wayland: true,
             has_display: true,
+            has_tmux: true,
             has_wl_copy: true,
             has_xclip: true,
         };
@@ -1881,6 +1916,7 @@ mod tests {
             arboard_ok: false,
             has_wayland: true,
             has_display: true,
+            has_tmux: false,
             has_wl_copy: true,
             has_xclip: true,
         };
@@ -1897,6 +1933,7 @@ mod tests {
             arboard_ok: false,
             has_wayland: false,
             has_display: true,
+            has_tmux: false,
             has_wl_copy: false,
             has_xclip: true,
         };
@@ -1913,6 +1950,7 @@ mod tests {
             arboard_ok: false,
             has_wayland: false,
             has_display: false,
+            has_tmux: false,
             has_wl_copy: false,
             has_xclip: false,
         };
@@ -1921,6 +1959,31 @@ mod tests {
             select_clipboard_backend(&probe),
             ClipboardBackend::None
         );
+    }
+
+    #[test]
+    fn select_clipboard_uses_osc52_in_tmux() {
+        let probe = MockClipboardProbe {
+            arboard_ok: false,
+            has_wayland: false,
+            has_display: false,
+            has_tmux: true,
+            has_wl_copy: false,
+            has_xclip: false,
+        };
+
+        assert_eq!(
+            select_clipboard_backend(&probe),
+            ClipboardBackend::Osc52
+        );
+    }
+
+    #[test]
+    fn osc52_sequence_wraps_for_tmux() {
+        let sequence = osc52_sequence("test", true);
+        assert!(sequence.starts_with("\x1bPtmux;"));
+        assert!(sequence.contains("\x1b]52;c;"));
+        assert!(sequence.ends_with("\x1b\\"));
     }
 
     #[test]
@@ -2223,6 +2286,7 @@ mod tests {
         arboard_ok: bool,
         has_wayland: bool,
         has_display: bool,
+        has_tmux: bool,
         has_wl_copy: bool,
         has_xclip: bool,
     }
@@ -2238,6 +2302,10 @@ mod tests {
 
         fn has_display(&self) -> bool {
             self.has_display
+        }
+
+        fn has_tmux(&self) -> bool {
+            self.has_tmux
         }
 
         fn command_exists(&self, command: &str) -> bool {

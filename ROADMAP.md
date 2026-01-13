@@ -17,6 +17,7 @@
 
 ## Near Term
 - Expand/contract the tree by pressing Enter.
+- Ctrl-C closes the app
 - Alphabetize the groups and projects
 
 ## Future
