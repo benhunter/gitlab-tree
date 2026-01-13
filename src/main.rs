@@ -2,7 +2,9 @@ use std::{
     collections::HashMap,
     env,
     io,
+    io::Write,
     path::PathBuf,
+    process::{Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use std::sync::mpsc;
@@ -50,7 +52,7 @@ fn restore_terminal(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> Re
 fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, config: Config) -> Result<()> {
     let mut loader = Some(start_loader(config.clone()));
     let mut app = None;
-    let mut clipboard = SystemClipboard::new().ok();
+    let mut clipboard = build_clipboard();
     let mut browser = SystemBrowser;
     loop {
         if let Some(handle) = loader.as_mut() {
@@ -83,9 +85,14 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, config: Config
 
             if event::poll(Duration::from_millis(200))? {
                 if let Event::Key(key) = event::read()? {
-                    let clipboard_ref =
-                        clipboard.as_mut().map(|cb| cb as &mut dyn ClipboardSink);
-                    let action = app_ref.handle_key(key.code, &visible, clipboard_ref, &mut browser)?;
+                    let action = if let Some(mut cb) = clipboard.take() {
+                        let action =
+                            app_ref.handle_key(key.code, &visible, Some(&mut *cb), &mut browser)?;
+                        clipboard = Some(cb);
+                        action
+                    } else {
+                        app_ref.handle_key(key.code, &visible, None, &mut browser)?
+                    };
                     pending_action = Some(action);
                 }
             }
@@ -322,8 +329,55 @@ trait ClipboardSink {
     fn set_text(&mut self, text: String) -> Result<()>;
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum ClipboardBackend {
+    Arboard,
+    WlCopy,
+    Xclip,
+    None,
+}
+
+trait ClipboardProbe {
+    fn arboard_ok(&self) -> bool;
+    fn has_wayland(&self) -> bool;
+    fn has_display(&self) -> bool;
+    fn command_exists(&self, command: &str) -> bool;
+}
+
 trait BrowserOpener {
     fn open(&mut self, url: &str) -> Result<()>;
+}
+
+struct CommandClipboard {
+    command: String,
+    args: Vec<String>,
+}
+
+impl CommandClipboard {
+    fn new(command: &str, args: &[&str]) -> Self {
+        Self {
+            command: command.to_string(),
+            args: args.iter().map(|arg| arg.to_string()).collect(),
+        }
+    }
+}
+
+impl ClipboardSink for CommandClipboard {
+    fn set_text(&mut self, text: String) -> Result<()> {
+        let mut child = Command::new(&self.command)
+            .args(&self.args)
+            .stdin(Stdio::piped())
+            .spawn()
+            .map_err(|err| anyhow::anyhow!("clipboard command failed: {err}"))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin.write_all(text.as_bytes())?;
+        }
+        let status = child.wait()?;
+        if !status.success() {
+            anyhow::bail!("clipboard command exited with {status}");
+        }
+        Ok(())
+    }
 }
 
 struct SystemClipboard {
@@ -344,6 +398,58 @@ impl ClipboardSink for SystemClipboard {
             .set_text(text)
             .map_err(|err| anyhow::anyhow!("clipboard write failed: {err}"))?;
         Ok(())
+    }
+}
+
+struct SystemClipboardProbe;
+
+impl ClipboardProbe for SystemClipboardProbe {
+    fn arboard_ok(&self) -> bool {
+        SystemClipboardHandle::new().is_ok()
+    }
+
+    fn has_wayland(&self) -> bool {
+        env::var_os("WAYLAND_DISPLAY").is_some()
+    }
+
+    fn has_display(&self) -> bool {
+        env::var_os("DISPLAY").is_some()
+    }
+
+    fn command_exists(&self, command: &str) -> bool {
+        Command::new("sh")
+            .arg("-c")
+            .arg(format!("command -v {command} >/dev/null 2>&1"))
+            .status()
+            .map(|status| status.success())
+            .unwrap_or(false)
+    }
+}
+
+fn select_clipboard_backend(probe: &dyn ClipboardProbe) -> ClipboardBackend {
+    if probe.arboard_ok() {
+        ClipboardBackend::Arboard
+    } else if probe.has_wayland() && probe.command_exists("wl-copy") {
+        ClipboardBackend::WlCopy
+    } else if probe.has_display() && probe.command_exists("xclip") {
+        ClipboardBackend::Xclip
+    } else {
+        ClipboardBackend::None
+    }
+}
+
+fn build_clipboard() -> Option<Box<dyn ClipboardSink>> {
+    let probe = SystemClipboardProbe;
+    match select_clipboard_backend(&probe) {
+        ClipboardBackend::Arboard => SystemClipboard::new()
+            .ok()
+            .map(|clipboard| Box::new(clipboard) as Box<dyn ClipboardSink>),
+        ClipboardBackend::WlCopy => Some(Box::new(CommandClipboard::new("wl-copy", &[]))),
+        ClipboardBackend::Xclip => Some(Box::new(CommandClipboard::new(
+            "xclip",
+            &["-selection", "clipboard"],
+        ))),
+        ClipboardBackend::None => None,
     }
 }
 
@@ -1754,6 +1860,70 @@ mod tests {
     }
 
     #[test]
+    fn select_clipboard_prefers_arboard() {
+        let probe = MockClipboardProbe {
+            arboard_ok: true,
+            has_wayland: true,
+            has_display: true,
+            has_wl_copy: true,
+            has_xclip: true,
+        };
+
+        assert_eq!(
+            select_clipboard_backend(&probe),
+            ClipboardBackend::Arboard
+        );
+    }
+
+    #[test]
+    fn select_clipboard_uses_wl_copy_on_wayland() {
+        let probe = MockClipboardProbe {
+            arboard_ok: false,
+            has_wayland: true,
+            has_display: true,
+            has_wl_copy: true,
+            has_xclip: true,
+        };
+
+        assert_eq!(
+            select_clipboard_backend(&probe),
+            ClipboardBackend::WlCopy
+        );
+    }
+
+    #[test]
+    fn select_clipboard_uses_xclip_on_x11() {
+        let probe = MockClipboardProbe {
+            arboard_ok: false,
+            has_wayland: false,
+            has_display: true,
+            has_wl_copy: false,
+            has_xclip: true,
+        };
+
+        assert_eq!(
+            select_clipboard_backend(&probe),
+            ClipboardBackend::Xclip
+        );
+    }
+
+    #[test]
+    fn select_clipboard_none_when_unavailable() {
+        let probe = MockClipboardProbe {
+            arboard_ok: false,
+            has_wayland: false,
+            has_display: false,
+            has_wl_copy: false,
+            has_xclip: false,
+        };
+
+        assert_eq!(
+            select_clipboard_backend(&probe),
+            ClipboardBackend::None
+        );
+    }
+
+    #[test]
     fn from_gitlab_data_builds_parent_child_relationships() {
         let groups = vec![
             GitLabGroup {
@@ -2047,6 +2217,36 @@ mod tests {
         assert_eq!(loaded.groups[0].name, "root");
         assert_eq!(loaded.projects_by_group.len(), 1);
         assert_eq!(loaded.projects_by_group[0].projects[0].name, "proj");
+    }
+
+    struct MockClipboardProbe {
+        arboard_ok: bool,
+        has_wayland: bool,
+        has_display: bool,
+        has_wl_copy: bool,
+        has_xclip: bool,
+    }
+
+    impl ClipboardProbe for MockClipboardProbe {
+        fn arboard_ok(&self) -> bool {
+            self.arboard_ok
+        }
+
+        fn has_wayland(&self) -> bool {
+            self.has_wayland
+        }
+
+        fn has_display(&self) -> bool {
+            self.has_display
+        }
+
+        fn command_exists(&self, command: &str) -> bool {
+            match command {
+                "wl-copy" => self.has_wl_copy,
+                "xclip" => self.has_xclip,
+                _ => false,
+            }
+        }
     }
 
     struct MockClipboard {

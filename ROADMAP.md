@@ -13,10 +13,10 @@
 - Cache API responses to speed up startup.
 - Add a refresh keybind (`r`) to reload the tree from GitLab.
 - Enforce feature-branch-only commits in contributor workflow.
+- Add clipboard fallback for headless sessions (e.g., `wl-copy`, `xclip`).
 
 ## Near Term
 - Expand/contract the tree by pressing Enter.
-- Add clipboard fallback for headless sessions (e.g., `wl-copy`, `xclip`).
 - Alphabetize the groups and projects
 
 ## Future
