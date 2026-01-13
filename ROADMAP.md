@@ -14,9 +14,9 @@
 - Add a refresh keybind (`r`) to reload the tree from GitLab.
 - Enforce feature-branch-only commits in contributor workflow.
 - Add clipboard fallback for headless sessions (e.g., `wl-copy`, `xclip`).
+- Expand/contract the tree by pressing Enter.
 
 ## Near Term
-- Expand/contract the tree by pressing Enter.
 - Ctrl-C closes the app
 - Alphabetize the groups and projects
 

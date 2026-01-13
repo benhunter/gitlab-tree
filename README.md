@@ -49,5 +49,6 @@ GITLAB_URL=https://gitlab.example.com GITLAB_TOKEN=... cargo run
 - `enter`: apply search
 - `esc`: clear search
 - `r`: refresh the tree from GitLab
+- `enter`: toggle expand/collapse when not searching
 
 Clipboard fallback: if no GUI clipboard is available, the app will try `wl-copy` (Wayland), `xclip` (X11), or OSC52 (tmux-compatible terminals) when present.

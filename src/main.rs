@@ -186,7 +186,7 @@ fn ui(
         "token: set"
     };
     let mut footer = format!(
-        "q quit | r refresh | up/down move | right expand | left collapse | y yank | o open | / search | {} | {}",
+        "q quit | r refresh | enter toggle | up/down move | right expand | left collapse | y yank | o open | / search | {} | {}",
         app.config.gitlab_url, token_state
     );
     if let Some(status) = &app.status {
@@ -1443,6 +1443,17 @@ impl App {
         }
     }
 
+    fn toggle_selected(&mut self, visible: &[VisibleNode]) {
+        if visible.is_empty() {
+            return;
+        }
+        let node_id = visible[self.selected].id;
+        if self.nodes[node_id].children.is_empty() {
+            return;
+        }
+        self.nodes[node_id].expanded = !self.nodes[node_id].expanded;
+    }
+
     fn handle_key(
         &mut self,
         key: KeyCode,
@@ -1464,6 +1475,10 @@ impl App {
         let action = match key {
             KeyCode::Char('q') => KeyAction::Quit,
             KeyCode::Char('r') => KeyAction::Reload,
+            KeyCode::Enter => {
+                self.toggle_selected(visible);
+                KeyAction::None
+            }
             KeyCode::Up => {
                 self.move_up();
                 KeyAction::None
@@ -1891,6 +1906,55 @@ mod tests {
         } else {
             panic!("expected reload action");
         }
+    }
+
+    #[test]
+    fn handle_key_enter_toggles_expansion() {
+        let mut nodes = Vec::new();
+        let root = push_node(
+            &mut nodes,
+            "root",
+            NodeKind::Group,
+            "https://example.com/root",
+            "root",
+            "private",
+            None,
+        );
+        let child = push_node(
+            &mut nodes,
+            "child",
+            NodeKind::Project,
+            "https://example.com/child",
+            "root/child",
+            "private",
+            None,
+        );
+        nodes[root].children.push(child);
+
+        let parent = build_parent_map(&nodes);
+        let mut app = App {
+            nodes,
+            roots: vec![root],
+            parent,
+            selected: 0,
+            config: test_config(),
+            status: None,
+            pending_g: false,
+            toast: None,
+            search_query: None,
+            search_mode: false,
+        };
+
+        let visible = app.visible_nodes();
+        let mut browser = MockBrowser { opened: None };
+
+        app.handle_key(KeyCode::Enter, &visible, None, &mut browser)
+            .expect("handle key");
+        assert!(app.nodes[root].expanded);
+
+        app.handle_key(KeyCode::Enter, &visible, None, &mut browser)
+            .expect("handle key");
+        assert!(!app.nodes[root].expanded);
     }
 
     #[test]
