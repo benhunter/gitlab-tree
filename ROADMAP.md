@@ -20,6 +20,7 @@
 - PgUp/PgDn navigates by page.
 
 ## Near Term
+- the group with the same name as the user should not include projects that are in another group. The user node should only have personal projects that are not under a group.
 
 ## Future
 - Configurable sort options for the group order and project order, such as alph or date of recent activity.
