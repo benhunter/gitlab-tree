@@ -18,6 +18,7 @@
 
 ## Near Term
 - Ctrl-C closes the app
+- PgUp/PgDn navigates by page
 - Alphabetize the groups and projects
 
 ## Future
